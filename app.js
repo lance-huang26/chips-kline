@@ -42,6 +42,16 @@
     });
   }
   function sign(n) { return (n > 0 ? '+' : '') + n; }
+
+  // 本日操作＝今日未平倉／淨口數 減 昨日。第一天沒有前一日可比，回傳 null。
+  function dayDelta(i, key) {
+    if (i === 0) return null;
+    return S.chips[i][key] - S.chips[i - 1][key];
+  }
+  function fmtDelta(d) {
+    if (d === null) return '—';
+    return (d > 0 ? '+' : '') + fmt(d);
+  }
   function cls(n) { return n > 0 ? 'pos' : (n < 0 ? 'neg' : ''); }
   function el(id) { return document.getElementById(id); }
 
@@ -77,6 +87,66 @@
   }
   function scoreAll(threshold) {
     return S.chips.map(function (c) { return scoreRow(c, threshold); });
+  }
+
+  // 取一個「好看的」刻度間距：1/1.5/2/2.5/3/4/5/6/8 ×10^k 之中，>= x 的最小值
+  var NICE = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+  function niceStep(x) {
+    if (!(x > 0)) return 1;
+    var e = Math.pow(10, Math.floor(Math.log(x) / Math.LN10));
+    var m = x / e;
+    for (var i = 0; i < NICE.length; i++) {
+      if (m <= NICE[i] + 1e-9) return NICE[i] * e;
+    }
+    return 10 * e;
+  }
+
+  /* 副圖雙軸對齊。
+   * foreign_fut 的量級（約 -9 萬）和其他四項（數千）差太多，必須用獨立右軸；
+   * 但兩軸各自 auto-scale 的話，「外資是否站上門檻」和「其他項是否為正」
+   * 在畫面上會落在不同高度，看起來對不起來。
+   *
+   * 這裡把兩軸都切成固定 N 段，並讓右軸的「門檻」和左軸的「0」
+   * 落在同一條格線（由下往上數第 k 條）上，所以：
+   *   - 兩軸格線完全重疊
+   *   - 那條線以上 = 該票投 +1，以下 = -1，五條線讀法一致
+   * k 由左軸資料的正負比例決定（挑總範圍最小的那個），右軸再跟著它算。
+   */
+  var AXIS_SPLITS = 4;
+  function subAxisRanges() {
+    var N = AXIS_SPLITS;
+
+    // 左軸：目前有勾選的「數千」等級欄位
+    var lVals = [];
+    CHIP_FIELDS.forEach(function (f) {
+      if (f.axis === 'small' && S.shown[f.key]) {
+        S.chips.forEach(function (c) { lVals.push(c[f.key]); });
+      }
+    });
+    var lMin = lVals.length ? Math.min.apply(null, lVals) : -1;
+    var lMax = lVals.length ? Math.max.apply(null, lVals) : 1;
+    var lPad = 0.08 * Math.max(lMax - lMin, 1);
+    var lo = Math.min(lMin - lPad, 0), hi = Math.max(lMax + lPad, 0);
+
+    var best = null;
+    for (var k = 1; k <= N - 1; k++) {
+      var iv = niceStep(Math.max(-lo / k, hi / (N - k)));
+      if (!best || iv * N < best.iv * N) best = { k: k, iv: iv };
+    }
+
+    // 右軸：門檻擺在同一條格線上，往上往下各留足夠容納資料的空間
+    var rVals = S.chips.map(function (c) { return c.foreign_fut; });
+    var rMin = Math.min.apply(null, rVals), rMax = Math.max.apply(null, rVals);
+    var rPad = 0.08 * Math.max(rMax - rMin, 1);
+    var below = Math.max(S.threshold - rMin, 0) + rPad;
+    var above = Math.max(rMax - S.threshold, 0) + rPad;
+    var ivR = niceStep(Math.max(below / best.k, above / (N - best.k)));
+
+    return {
+      k: best.k, n: N,
+      left:  { min: -best.k * best.iv, max: (N - best.k) * best.iv, interval: best.iv },
+      right: { min: S.threshold - best.k * ivR, max: S.threshold + (N - best.k) * ivR, interval: ivR }
+    };
   }
 
   function stockByCode(code) {
@@ -304,6 +374,27 @@
       markLine: { silent: true, symbol: 'none', data: mlData, animation: false }
     };
 
+    var sub = subAxisRanges();
+
+    // 副圖的對齊基準線：左軸 0 == 右軸門檻，兩者在同一個高度
+    var subGuide = {
+      name: '__sub_guide', type: 'line', xAxisIndex: 1, yAxisIndex: 2,
+      data: S.dates.map(function () { return null; }),
+      silent: true, showSymbol: false, z: 0,
+      markLine: {
+        silent: true, symbol: 'none', animation: false,
+        data: [{
+          yAxis: 0,
+          lineStyle: { type: 'dashed', color: '#8b8a84', width: 1.5 },
+          label: {
+            show: true, position: 'insideStartTop', fontSize: 10.5, color: '#6e6c66',
+            backgroundColor: 'rgba(252,252,251,.85)', padding: [1, 4],
+            formatter: '左軸 0 ＝ 右軸門檻 ' + fmt(S.threshold)
+          }
+        }]
+      }
+    };
+
     var chipSeries = CHIP_FIELDS.filter(function (f) { return S.shown[f.key]; }).map(function (f) {
       return {
         name: f.label,
@@ -380,16 +471,18 @@
           axisLabel: { color: SCORE_COLOR, fontSize: 11 },
           splitLine: { show: false }
         },
-        { // 副圖左：其他四項（口）
-          type: 'value', gridIndex: 1, scale: true, name: '口（前十大／選擇權）',
+        { // 副圖左：其他四項（口）。min/max/interval 由 subAxisRanges() 算，和右軸共用格線
+          type: 'value', gridIndex: 1, name: '口（前十大／選擇權）',
+          min: sub.left.min, max: sub.left.max, interval: sub.left.interval,
           nameTextStyle: { color: '#807e78', fontSize: 10.5, align: 'left' }, nameGap: 12,
           axisLine: { show: false }, axisTick: { show: false },
           axisLabel: { color: '#807e78', fontSize: 10.5 },
           splitLine: { lineStyle: { color: '#efefec' } }
         },
-        { // 副圖右：外資台指期（數量級差很多，獨立軸）
-          type: 'value', gridIndex: 1, scale: true, position: 'right',
-          name: '口（外資期貨）',
+        { // 副圖右：外資台指期。門檻對齊左軸的 0，段數與左軸相同故格線重疊
+          type: 'value', gridIndex: 1, position: 'right',
+          min: sub.right.min, max: sub.right.max, interval: sub.right.interval,
+          name: '口（外資期貨，門檻對齊左軸 0）',
           nameTextStyle: { color: '#2a78d6', fontSize: 10.5, align: 'right' }, nameGap: 12,
           axisLine: { show: false }, axisTick: { show: false },
           axisLabel: { color: '#2a78d6', fontSize: 10.5 },
@@ -397,7 +490,7 @@
         }
       ],
       series: [bgSeries('__bg_up', bgUp), bgSeries('__bg_dn', bgDn)]
-        .concat(priceSeries, [scoreSeries], chipSeries)
+        .concat(priceSeries, [scoreSeries, subGuide], chipSeries)
     };
   }
 
@@ -435,12 +528,18 @@
 
     // 五票
     h += '<div style="padding:7px 11px 3px"><table style="font-size:11.5px;border-spacing:0">';
+    h += '<tr style="color:#a09e97;font-size:10.5px"><td></td>' +
+         '<td style="padding:0 8px 2px 0;text-align:right">口數</td>' +
+         '<td style="padding:0 8px 2px 0;text-align:right">本日操作</td>' +
+         '<td style="padding:0 0 2px;text-align:right">票</td></tr>';
     CHIP_FIELDS.forEach(function (f, i) {
-      var v = s.votes[i];
+      var v = s.votes[i], dd = dayDelta(idx, f.key);
       h += '<tr>' +
         '<td style="padding:1px 8px 1px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
           f.color + ';margin-right:6px"></span>' + f.label + '</td>' +
         '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums">' + fmt(c[f.key]) + '</td>' +
+        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;color:' +
+          (dd === null ? '#a09e97' : dd > 0 ? UP : dd < 0 ? DOWN : '#52514e') + '">' + fmtDelta(dd) + '</td>' +
         '<td style="padding:1px 0;text-align:right;font-weight:600;color:' + (v > 0 ? UP : DOWN) + '">' + sign(v) + '</td>' +
         '</tr>';
     });
@@ -473,10 +572,12 @@
 
     var h1 = '<tr><th class="date" rowspan="2">日期</th>' +
              '<th rowspan="2">收盤</th><th rowspan="2">漲跌幅</th>';
-    CHIP_FIELDS.forEach(function (f) { h1 += '<th class="grp" colspan="2">' + f.short + '</th>'; });
+    CHIP_FIELDS.forEach(function (f) { h1 += '<th class="grp" colspan="3">' + f.short + '</th>'; });
     h1 += '<th class="sep" rowspan="2">期貨小計</th><th rowspan="2">選擇權小計</th><th rowspan="2">總分</th></tr>';
     var h2 = '<tr>';
-    CHIP_FIELDS.forEach(function () { h2 += '<th class="sep">數值</th><th>票</th>'; });
+    CHIP_FIELDS.forEach(function () {
+      h2 += '<th class="sep">口數</th><th>本日操作</th><th>票</th>';
+    });
     h2 += '</tr>';
     thead.innerHTML = h1 + h2;
 
@@ -494,8 +595,9 @@
           (pct === null ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%') + '</td>';
 
       CHIP_FIELDS.forEach(function (f, k) {
-        var v = s.votes[k];
+        var v = s.votes[k], dd = dayDelta(i, f.key);
         body += '<td class="sep">' + fmt(c[f.key]) + '</td>' +
+                '<td class="delta ' + (dd === null ? '' : cls(dd)) + '">' + fmtDelta(dd) + '</td>' +
                 '<td class="vote ' + cls(v) + '">' + sign(v) + '</td>';
       });
 

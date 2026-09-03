@@ -120,9 +120,86 @@ with sync_playwright() as pw:
     pg.eval_on_selector("#compareChk", "e=>{e.checked=true;e.dispatchEvent(new Event('change',{bubbles:true}));}")
     pg.wait_for_timeout(150)
     cmp_opt = pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+
+    # 關掉比較模式，改測「勾選狀態改變 + 非預設門檻」時副圖兩軸還對不對得齊
+    pg.eval_on_selector("#compareChk", "e=>{e.checked=false;e.dispatchEvent(new Event('change',{bubbles:true}));}")
+    toggle_cases = []
+    for off, thr in ((["top10_trader", "top10_specific"], -86000),
+                     (["foreign_opt", "dealer_opt", "top10_specific"], -79000),
+                     ([], -90500)):
+        pg.evaluate(
+            """(names) => {
+                 const labs = [...document.querySelectorAll('#chipChks label')];
+                 const order = ['外資台指期未平倉','前十大交易人','前十大特定人','選擇權外資淨口數','選擇權自營商淨口數'];
+                 const keys  = ['foreign_fut','top10_trader','top10_specific','foreign_opt','dealer_opt'];
+                 labs.forEach((l,i) => {
+                   const cb = l.querySelector('input');
+                   const want = !names.includes(keys[i]);
+                   if (cb.checked !== want) { cb.checked = want; cb.dispatchEvent(new Event('change',{bubbles:true})); }
+                 });
+               }""", off)
+        set_thr(thr)
+        toggle_cases.append((off, thr,
+            pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")))
+
+    # tooltip 實際輸出（formatter 是函式，JSON 序列化會掉，所以在頁面裡直接呼叫）
+    set_thr(-83000)
+    tips = pg.evaluate(
+        """(idxs) => { const o = window.__OPTS__[window.__OPTS__.length-1];
+                       return idxs.map(i => o.tooltip.formatter([{dataIndex: i}])); }""",
+        [0, 5, 20])
     b.close()
 
 # ---------- 3. 比對 ----------
+SMALL_KEYS = ["top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]
+
+
+def check_sub_axes(opt, thr, small_keys, tag):
+    """副圖雙軸：右軸的門檻必須和左軸的 0 落在同一個高度，且兩軸格線重疊。"""
+    bad = []
+    yl, yr = opt["yAxis"][2], opt["yAxis"][3]
+    for ax, nm in ((yl, "副圖左軸"), (yr, "副圖右軸")):
+        for key in ("min", "max", "interval"):
+            if ax.get(key) is None:
+                bad.append("%s %s 沒有設 %s（沒設就會各自 auto-scale，對不齊）" % (tag, nm, key))
+                return bad
+        if ax.get("scale"):
+            bad.append("%s %s 不該再開 scale" % (tag, nm))
+
+    fl = (0 - yl["min"]) / (yl["max"] - yl["min"])          # 左軸 0 的相對高度
+    fr = (thr - yr["min"]) / (yr["max"] - yr["min"])        # 右軸門檻的相對高度
+    if abs(fl - fr) > 1e-9:
+        bad.append("%s 對齊失敗：左軸 0 在 %.6f，右軸門檻在 %.6f" % (tag, fl, fr))
+
+    nl = (yl["max"] - yl["min"]) / yl["interval"]
+    nr = (yr["max"] - yr["min"]) / yr["interval"]
+    if abs(nl - nr) > 1e-9:
+        bad.append("%s 兩軸段數不同（%.3f vs %.3f），格線不會重疊" % (tag, nl, nr))
+    if abs(nl - round(nl)) > 1e-9:
+        bad.append("%s 段數不是整數：%.3f" % (tag, nl))
+    # 對齊線必須落在某條格線上（而不是格子中間）
+    if abs(fl * nl - round(fl * nl)) > 1e-9:
+        bad.append("%s 對齊線沒有落在格線上" % tag)
+
+    # 資料不能被切掉
+    if small_keys:
+        sv = [c[k] for c in chips for k in small_keys]
+        if yl["min"] > min(sv) or yl["max"] < max(sv):
+            bad.append("%s 左軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
+                       % (tag, yl["min"], yl["max"], min(sv), max(sv)))
+    fv = [c["foreign_fut"] for c in chips]
+    if yr["min"] > min(fv) or yr["max"] < max(fv):
+        bad.append("%s 右軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
+                   % (tag, yr["min"], yr["max"], min(fv), max(fv)))
+
+    g = [s for s in opt["series"] if s.get("name") == "__sub_guide"]
+    if not g:
+        bad.append("%s 副圖少了對齊基準線 __sub_guide" % tag)
+    elif g[0].get("yAxisIndex") != 2 or g[0]["markLine"]["data"][0].get("yAxis") != 0:
+        bad.append("%s 對齊基準線沒有畫在左軸 0" % tag)
+    return bad
+
+
 fails = []
 if err_visible:
     fails.append("頁面顯示了 #loadErr 錯誤區塊")
@@ -152,20 +229,32 @@ for thr in (-83000, -80000):
         got_pct = float(row[2].replace("%", "").replace("+", ""))
         if abs(got_pct - want_pct) > 0.011:
             fails.append("thr=%s %s 漲跌幅 %r != %.2f%%" % (thr, d, row[2], want_pct))
+        # 每個欄位三格：口數 / 本日操作 / 票
         for k, f in enumerate(["foreign_fut", "top10_trader", "top10_specific",
                                "foreign_opt", "dealer_opt"]):
-            gv = row[3 + k * 2].replace(",", "")
+            gv = row[3 + k * 3].replace(",", "")
             if int(gv) != chips[i][f]:
-                fails.append("thr=%s %s %s 數值 %s != %s" % (thr, d, f, gv, chips[i][f]))
-            gvote = int(row[4 + k * 2])
+                fails.append("thr=%s %s %s 口數 %s != %s" % (thr, d, f, gv, chips[i][f]))
+
+            gd = row[4 + k * 3].replace(",", "").replace("+", "")
+            want_d = None if i == 0 else chips[i][f] - chips[i - 1][f]
+            if want_d is None:
+                if gd != "—":
+                    fails.append("thr=%s 第一天 %s 本日操作應為 —，卻是 %r" % (thr, f, gd))
+            elif int(gd) != want_d:
+                fails.append("thr=%s %s %s 本日操作 %s != %d" % (thr, d, f, gd, want_d))
+
+            gvote = int(row[5 + k * 3])
             if gvote != v[k]:
                 fails.append("thr=%s %s %s 票 %d != %d" % (thr, d, f, gvote, v[k]))
-        if int(row[13]) != fut:
-            fails.append("thr=%s %s 期貨小計 %s != %d" % (thr, d, row[13], fut))
-        if int(row[14]) != opt:
-            fails.append("thr=%s %s 選擇權小計 %s != %d" % (thr, d, row[14], opt))
-        if int(row[15]) != tot:
-            fails.append("thr=%s %s 總分 %s != %d" % (thr, d, row[15], tot))
+        if int(row[18]) != fut:
+            fails.append("thr=%s %s 期貨小計 %s != %d" % (thr, d, row[18], fut))
+        if int(row[19]) != opt:
+            fails.append("thr=%s %s 選擇權小計 %s != %d" % (thr, d, row[19], opt))
+        if int(row[20]) != tot:
+            fails.append("thr=%s %s 總分 %s != %d" % (thr, d, row[20], tot))
+        if len(row) != 21:
+            fails.append("thr=%s %s 欄數 %d != 21" % (thr, d, len(row)))
 
     # 圖上的總分序列
     o = results[str(thr) + "_opt"]
@@ -220,13 +309,16 @@ for thr in (-83000, -80000):
         if first != [p0["open"], p0["close"], p0["low"], p0["high"]]:
             fails.append("K 棒 OHLC 順序不對：%s" % first)
     # 副圖：foreign_fut 獨立 y 軸
-    chip_s = {s["name"]: s for s in o["series"] if s.get("xAxisIndex") == 1}
+    chip_s = {s["name"]: s for s in o["series"]
+              if s.get("xAxisIndex") == 1 and s.get("name") != "__sub_guide"}
     if len(chip_s) != 5:
         fails.append("副圖籌碼線數量 %d != 5" % len(chip_s))
     fa = chip_s.get("外資台指期未平倉", {}).get("yAxisIndex")
-    others = set(s["yAxisIndex"] for n, s in chip_s.items() if n != "外資台指期未平倉")
+    others = set(s["yAxisIndex"] for n, s in chip_s.items()
+                 if n not in ("外資台指期未平倉", "__sub_guide"))
     if fa is None or others != {2} or fa != 3:
         fails.append("foreign_fut 沒有用獨立 y 軸（fa=%s others=%s）" % (fa, others))
+    fails += check_sub_axes(o, thr, SMALL_KEYS, "thr=%s" % thr)
 
 # 門檻差異天數
 m = re.search(r"總分不同的有\s*(\d+)\s*天", thr_note)
@@ -241,6 +333,31 @@ if cmp_opt is None or not any(s.get("type") == "line" and s.get("yAxisIndex") ==
     fails.append("比較模式沒有產生指數化折線")
 elif len([s for s in cmp_opt["series"] if s.get("yAxisIndex") == 0 and s.get("xAxisIndex") == 0]) != 3:
     fails.append("比較模式的折線不是 3 條")
+
+for off, thr, opt in toggle_cases:
+    fails += check_sub_axes(opt, thr, [k for k in SMALL_KEYS if k not in off],
+                            "關掉%s @門檻%s" % (off or ["無"], thr))
+print("副圖雙軸對齊：%d 種門檻/勾選組合皆通過" % (2 + len(toggle_cases)))
+
+# tooltip：口數與票數之間要出現「本日操作」，順序不能跑掉
+import html as _html
+for idx, tip in zip([0, 5, 20], tips):
+    txt = re.sub(r"<[^>]+>", "|", tip)
+    txt = _html.unescape(txt)
+    if "本日操作" not in tip:
+        fails.append("tooltip(第%d天) 沒有本日操作欄" % idx)
+    for f in ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]:
+        val = "{:,}".format(chips[idx][f])
+        want = "—" if idx == 0 else "{}{:,}".format("+" if chips[idx][f] > chips[idx-1][f] else "",
+                                                   chips[idx][f] - chips[idx-1][f])
+        # 口數 → 本日操作 → 票，三者必須依序出現
+        p_val = txt.find("|" + val + "|")
+        p_dlt = txt.find("|" + want + "|", p_val if p_val >= 0 else 0)
+        if p_val < 0:
+            fails.append("tooltip(第%d天) 找不到 %s 的口數 %s" % (idx, f, val))
+        elif p_dlt < 0:
+            fails.append("tooltip(第%d天) %s 的本日操作 %s 沒有緊接在口數後面" % (idx, f, want))
+print("tooltip：口數 → 本日操作 → 票 的順序與數值正確（第 1／6／21 天）")
 
 for scheme, items in contrast.items():
     for it in items:
@@ -258,4 +375,5 @@ if fails:
     for f in fails[:40]:
         print("   -", f)
     sys.exit(1)
-print("✅ 全部通過：21 天 × 2 門檻 × 16 欄，表格 / 圖表序列 / markArea / markLine / 顏色 / 軸設定 皆與 Python 獨立計算一致")
+print("✅ 全部通過：21 天 × 2 門檻 × 21 欄（含本日操作），表格 / tooltip / 圖表序列 / "
+      "背景色塊 / markLine / 副圖雙軸對齊 / 顏色與對比 皆與 Python 獨立計算一致")

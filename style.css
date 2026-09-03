@@ -130,6 +130,9 @@ td.pos,.pos{color:var(--up)}
 td.neg,.neg{color:var(--down)}
 td.total{font-weight:700}
 .vote{font-weight:600}
+td.delta{color:var(--text-muted)}
+td.delta.pos{color:var(--up)}
+td.delta.neg{color:var(--down)}
 
 .foot-note{font-size:11.5px;color:var(--text-muted);line-height:1.75;margin:10px 2px 0}
 .foot-note code{background:#eeeeea;padding:1px 5px;border-radius:3px;font-size:11px}
