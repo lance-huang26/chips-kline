@@ -81,6 +81,37 @@ with sync_playwright() as pw:
         results[thr] = read_table()
         results[str(thr) + "_opt"] = pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
 
+    # 表單元件在「深色系統主題」下的可讀性（白字白底 bug 的回歸測試）
+    CONTRAST_JS = """
+    () => {
+      function lum(c){
+        const m = c.match(/[\\d.]+/g).map(Number);
+        const f = m.slice(0,3).map(v => { v/=255; return v<=0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055,2.4); });
+        return 0.2126*f[0] + 0.7152*f[1] + 0.0722*f[2];
+      }
+      function bgOf(el){
+        for (let n = el; n; n = n.parentElement) {
+          const b = getComputedStyle(n).backgroundColor;
+          if (b && !/rgba\\(0, 0, 0, 0\\)|transparent/.test(b)) return b;
+        }
+        return 'rgb(255,255,255)';
+      }
+      return [...document.querySelectorAll('input:not([type=range]), button, select, textarea')]
+        .map(el => {
+          const fg = getComputedStyle(el).color, bg = bgOf(el);
+          const a = lum(fg), b = lum(bg);
+          return { sel: el.id || el.className || el.tagName,
+                   fg, bg, ratio: +(((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05)).toFixed(2)) };
+        });
+    }
+    """
+    contrast = {}
+    for scheme in ("light", "dark"):
+        pg.emulate_media(color_scheme=scheme)
+        pg.wait_for_timeout(80)
+        contrast[scheme] = pg.evaluate(CONTRAST_JS)
+    pg.emulate_media(color_scheme="light")
+
     err_visible = pg.eval_on_selector("#loadErr", "e => !e.hidden")
     thr_note = pg.eval_on_selector("#thrNote", "e => e.textContent")
     stats = pg.eval_on_selector_all(".stat", "ns => ns.map(n => n.textContent.trim())")
@@ -210,6 +241,14 @@ if cmp_opt is None or not any(s.get("type") == "line" and s.get("yAxisIndex") ==
     fails.append("比較模式沒有產生指數化折線")
 elif len([s for s in cmp_opt["series"] if s.get("yAxisIndex") == 0 and s.get("xAxisIndex") == 0]) != 3:
     fails.append("比較模式的折線不是 3 條")
+
+for scheme, items in contrast.items():
+    for it in items:
+        if it["ratio"] < 4.5:
+            fails.append("%s 模式下 %s 文字對比只有 %s:1（fg %s / bg %s）"
+                         % (scheme, it["sel"], it["ratio"], it["fg"], it["bg"]))
+print("表單對比（深色系統主題）：",
+      ", ".join("%s %s:1" % (i["sel"], i["ratio"]) for i in contrast["dark"]))
 
 print("\n統計卡：", stats)
 print("門檻說明：", thr_note.strip()[:160])

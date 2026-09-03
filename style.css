@@ -24,6 +24,19 @@
 
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
+
+/* 表單元件不會繼承 body 的 color，一定要自己指定，
+   否則在深色模式下瀏覽器預設會給白字，配上本頁的淺色底就變成看不見。 */
+input,button,select,textarea{
+  color:var(--text-primary);
+  color-scheme:light;
+  font-family:inherit;
+}
+input:focus-visible,button:focus-visible{
+  outline:2px solid #2a78d6;
+  outline-offset:1px;
+}
+
 body{
   background:var(--surface-0);
   color:var(--text-primary);
@@ -53,7 +66,7 @@ body{
 }
 .seg button:last-child{border-right:0}
 .seg button:hover{background:#f0f0ed}
-.seg button.on{background:#2a78d6;color:#fff}
+.seg button.on{background:#1b5fae;color:#fff}  /* 白字要 >=4.5:1，#2a78d6 只有 4.42:1 */
 
 .chk,.chk-group label{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
 .chk.cmp{margin-top:9px;color:var(--text-secondary)}
@@ -64,7 +77,9 @@ body{
 .thr-row input[type=range]{width:180px;accent-color:#2a78d6}
 .thr-row input[type=number]{
   width:96px;padding:5px 7px;font:inherit;font-size:13px;
-  border:1px solid var(--border-strong);border-radius:5px;background:var(--surface-1);
+  border:1px solid var(--border-strong);border-radius:5px;
+  background:var(--surface-1);color:var(--text-primary);caret-color:var(--text-primary);
+  font-variant-numeric:tabular-nums;
 }
 .unit{color:var(--text-muted);font-size:12px}
 button.preset{
