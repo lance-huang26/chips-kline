@@ -89,3 +89,28 @@ data/raw/           證交所 API 的原始回應，保留供稽核
 兩者口徑不同，本頁只各自獨立呈現與投票，**沒有做任何相加減**。
 
 停牌或無交易的日子，K 棒留空，不用前一日補值。
+
+## 部署到 GitHub Pages
+
+專案已經 `git init` 好、第一個 commit 也做完了（branch: `main`）。
+在**你自己的終端機**跑（這個沙箱環境連不到 GitHub，所以推送要你來做）：
+
+```bash
+cd ~/Documents/chips-kline
+./deploy.sh <你的GitHub帳號>
+```
+
+- 有裝 `gh` CLI 的話，會自動建 public repo、推上去、並開好 Pages。
+- 沒裝的話，先到 github.com 手動開一個 **public** repo 叫 `chips-kline`
+  （不要勾 Add a README），再跑上面那行；推完照畫面提示到
+  Settings → Pages 把 Source 設成 `main` / `(root)`。
+
+網址會是 `https://<你的帳號>.github.io/chips-kline/`。
+
+之後更新資料，重跑 `fetch_prices.py` 後：
+
+```bash
+git add -A && git commit -m "update 2026/09" && git push
+```
+
+Pages 約 1 分鐘後就會換成新的。
