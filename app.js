@@ -260,18 +260,21 @@
       });
     }
 
-    // 總分為正 → 淡紅底；為負 → 淡綠底（合併連續同號區段）
-    var areas = [], i = 0;
-    while (i < sc.length) {
-      var s0 = Math.sign(sc[i].total);
-      if (s0 === 0) { i++; continue; }
-      var j = i;
-      while (j + 1 < sc.length && Math.sign(sc[j + 1].total) === s0) j++;
-      areas.push([
-        { coord: [i - 0.5, -5], itemStyle: { color: s0 > 0 ? UP_SOFT : DOWN_SOFT } },
-        { coord: [j + 0.5, 5] }
-      ]);
-      i = j + 1;
+    // 總分為正 → 淡紅底；為負 → 淡綠底。
+    // 註：category 軸上 markArea 的座標會被四捨五入到整數格、只能中心對中心，
+    //     做不出「剛好一整格」的區塊，所以背景改用兩支滿格 bar（上下各半）來畫。
+    var bgUp = [], bgDn = [];
+    sc.forEach(function (s) {
+      var col = s.total > 0 ? UP_SOFT : (s.total < 0 ? DOWN_SOFT : 'transparent');
+      bgUp.push({ value: 5, itemStyle: { color: col } });
+      bgDn.push({ value: -5, itemStyle: { color: col } });
+    });
+    function bgSeries(name, data) {
+      return {
+        name: name, type: 'bar', xAxisIndex: 0, yAxisIndex: 1, data: data,
+        barWidth: '100%', barCategoryGap: '0%', barGap: '-100%',
+        silent: true, z: 0, animation: false, emphasis: { disabled: true }
+      };
     }
 
     var mlData = [{
@@ -298,8 +301,7 @@
       lineStyle: { width: 2, color: SCORE_COLOR },
       itemStyle: { color: SCORE_COLOR, borderColor: '#fcfcfb', borderWidth: 2 },
       z: 6,
-      markLine: { silent: true, symbol: 'none', data: mlData, animation: false },
-      markArea: { silent: true, data: areas, animation: false }
+      markLine: { silent: true, symbol: 'none', data: mlData, animation: false }
     };
 
     var chipSeries = CHIP_FIELDS.filter(function (f) { return S.shown[f.key]; }).map(function (f) {
@@ -394,7 +396,8 @@
           splitLine: { show: false }
         }
       ],
-      series: priceSeries.concat([scoreSeries], chipSeries)
+      series: [bgSeries('__bg_up', bgUp), bgSeries('__bg_dn', bgDn)]
+        .concat(priceSeries, [scoreSeries], chipSeries)
     };
   }
 
@@ -535,8 +538,9 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     if (typeof echarts === 'undefined') {
-      fail('<b>ECharts 沒有載入成功。</b>本頁用 CDN 引入 ECharts，請確認有網路連線；' +
-           '或自行下載 <code>echarts.min.js</code> 放在同一層，並把 index.html 的 script 網址改成本機檔名。');
+      fail('<b>ECharts 沒有載入成功。</b>本頁先從 cdnjs、失敗再從 jsdelivr 載入 ECharts，' +
+           '兩個都沒成功。請確認網路，或自行下載 <code>echarts.min.js</code> 放在同一層，' +
+           '並把 index.html 裡的 script 網址改成本機檔名。');
       return;
     }
     loadData().then(boot).catch(function (e) {

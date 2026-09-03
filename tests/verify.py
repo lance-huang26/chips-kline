@@ -146,18 +146,30 @@ for thr in (-83000, -80000):
     ya = o["yAxis"][1]
     if (ya.get("min"), ya.get("max")) != (-5, 5):
         fails.append("總分軸範圍不是 -5~5")
-    # markArea 區段數
-    runs, i2 = 0, 0
+    # 背景色塊：兩支滿格 bar，每天的顏色要對應總分正負
     tots = [e[3] for e in exp[thr]]
-    while i2 < len(tots):
-        if tots[i2] == 0:
-            i2 += 1; continue
-        j = i2
-        while j + 1 < len(tots) and (tots[j+1] > 0) == (tots[i2] > 0) and tots[j+1] != 0:
-            j += 1
-        runs += 1; i2 = j + 1
-    if len(sser["markArea"]["data"]) != runs:
-        fails.append("thr=%s markArea 區段數 %d != %d" % (thr, len(sser["markArea"]["data"]), runs))
+    bgs = [s for s in o["series"] if str(s.get("name", "")).startswith("__bg_")]
+    if len(bgs) != 2:
+        fails.append("thr=%s 背景 bar 序列數 %d != 2" % (thr, len(bgs)))
+    for b in bgs:
+        if b.get("barWidth") != "100%" or b.get("barCategoryGap") != "0%" or b.get("barGap") != "-100%":
+            fails.append("背景 bar 沒有設成滿格（barWidth/barCategoryGap/barGap）")
+        if b.get("z") != 0 or not b.get("silent"):
+            fails.append("背景 bar 應該 z=0 且 silent")
+        if len(b["data"]) != len(tots):
+            fails.append("thr=%s 背景 bar 天數 %d != %d" % (thr, len(b["data"]), len(tots)))
+            continue
+        for k, item in enumerate(b["data"]):
+            col = item["itemStyle"]["color"]
+            want = "up" if tots[k] > 0 else ("down" if tots[k] < 0 else "none")
+            got = ("up" if "217,59,48" in col else
+                   "down" if "18,153,107" in col else
+                   "none" if col == "transparent" else "?" + col)
+            if got != want:
+                fails.append("thr=%s %s 背景色 %s != %s（總分 %d）"
+                             % (thr, chips[k]["date"], got, want, tots[k]))
+    if "markArea" in sser:
+        fails.append("總分序列不該再有 markArea（category 軸座標會被取整）")
     ml = sser["markLine"]["data"]
     if not any(m.get("yAxis") == 0 for m in ml):
         fails.append("缺少 y=0 分界線")

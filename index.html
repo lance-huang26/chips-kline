@@ -61,7 +61,13 @@
 
 <div id="loadErr" class="err" hidden></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.6.0/echarts.min.js"></script>
+<script>
+  /* 備援：cdnjs 連不上、或該版本沒上架時，改從 jsdelivr 載同一版 */
+  if (typeof echarts === 'undefined') {
+    document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"><\/scr' + 'ipt>');
+  }
+</script>
 <!-- 直接用 file:// 開啟時 fetch 會被瀏覽器擋住，以下兩支是同一份資料的離線備援 -->
 <script src="data/prices.js"></script>
 <script src="data/chips.js"></script>
