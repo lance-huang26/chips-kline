@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>法人籌碼五票 × 個股 K 線疊圖（2026/08）</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="page-head">
+  <h1>法人籌碼五票 × 個股 K 線疊圖</h1>
+  <p class="sub">2026/08/03 – 2026/08/31 ・ 共 <span id="dayCount">–</span> 個交易日 ・
+     籌碼來源：期交所三大法人、期貨大額交易人未沖銷部位結構表、選擇權（玩股網）</p>
+</header>
+
+<section class="controls" id="controls">
+  <div class="ctl-block">
+    <div class="ctl-label">主要標的（K 線）</div>
+    <div class="seg" id="stockSeg"></div>
+    <label class="chk cmp"><input type="checkbox" id="compareChk"> 三檔比較模式（收盤價指數化，基準 = 100）</label>
+  </div>
+
+  <div class="ctl-block">
+    <div class="ctl-label">外資台指期未平倉門檻（第 1 票）</div>
+    <div class="thr-row">
+      <input type="range" id="thrRange" min="-95000" max="-75000" step="500" value="-83000">
+      <input type="number" id="thrNum" step="500" value="-83000">
+      <span class="unit">口</span>
+      <button class="preset" data-v="-83000">-83000</button>
+      <button class="preset" data-v="-80000">-80000</button>
+    </div>
+    <div class="thr-note" id="thrNote"></div>
+  </div>
+
+  <div class="ctl-block">
+    <div class="ctl-label">副圖籌碼線</div>
+    <div class="chk-group" id="chipChks"></div>
+  </div>
+</section>
+
+<section class="stats" id="stats"></section>
+
+<div id="chart" class="chart"></div>
+
+<section class="table-wrap">
+  <h2>逐日明細</h2>
+  <div class="table-scroll">
+    <table id="dataTable">
+      <thead></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="foot-note">
+    註：<b>外資台指期未平倉</b>為純大台（TX）口徑；<b>前十大交易人／特定人</b>為期交所
+    <code>TX + MTX/4 + TMF/20</code> 的所有契約合併口徑（小台、微台已換算併入）。
+    兩者口徑不同，本頁只各自獨立呈現與投票，<b>不做相加減</b>。
+    停牌或無交易的日子 K 棒留空，不以前一日補值。
+  </p>
+</section>
+
+<div id="loadErr" class="err" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+<!-- 直接用 file:// 開啟時 fetch 會被瀏覽器擋住，以下兩支是同一份資料的離線備援 -->
+<script src="data/prices.js"></script>
+<script src="data/chips.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
