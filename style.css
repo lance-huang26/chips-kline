@@ -130,6 +130,11 @@ td.pos,.pos{color:var(--up)}
 td.neg,.neg{color:var(--down)}
 td.total{font-weight:700}
 .vote{font-weight:600}
+td.ma{color:var(--text-muted)}
+td.bias{color:var(--text-secondary)}
+td.bias.neg{color:var(--down)}
+/* 正乖離過大＝短線過熱，標紅並加底色，掃表格時一眼看得到 */
+td.bias.hot{color:var(--up);font-weight:700;background:rgba(217,59,48,.10)}
 td.delta{color:var(--text-muted)}
 td.delta.pos{color:var(--up)}
 td.delta.neg{color:var(--down)}

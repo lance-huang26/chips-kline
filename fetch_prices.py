@@ -34,6 +34,10 @@ RAW_DIR = os.path.join(DATA_DIR, "raw")
 DEFAULT_STOCKS = ["2330", "2308", "2368"]
 STOCK_NAMES = {"2330": "台積電", "2308": "台達電", "2368": "金像電"}
 
+# 前端算乖離率用的均線天數。要算出「顯示月份第一天」的均線，
+# 必須另外備妥前面 MA_PERIOD-1 個交易日的收盤價，所以要多抓前幾個月當暖身資料。
+MA_PERIOD = 20
+
 
 class FetchError(Exception):
     pass
@@ -115,11 +119,21 @@ def parse(payload: dict, stock_no: str) -> list:
     return rows
 
 
+def prev_month(month: str) -> str:
+    y, m = int(month[:4]), int(month[4:])
+    m -= 1
+    if m == 0:
+        y, m = y - 1, 12
+    return "%04d%02d" % (y, m)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="202608", help="YYYYMM，例如 202609")
     ap.add_argument("--stocks", default=",".join(DEFAULT_STOCKS), help="逗號分隔的股票代號")
     ap.add_argument("--use-cache", action="store_true", help="不連網，改用 data/raw 既有回應")
+    ap.add_argument("--warmup-months", type=int, default=1,
+                    help="額外往前抓幾個月當均線暖身資料（預設 1，MA20 夠用）")
     args = ap.parse_args()
 
     month = args.month.strip()
@@ -127,22 +141,35 @@ def main():
 
     os.makedirs(RAW_DIR, exist_ok=True)
 
-    out = {"month": month, "stocks": []}
-    for i, stock_no in enumerate(stocks):
+    warm_months = []
+    m = month
+    for _ in range(max(args.warmup_months, 0)):
+        m = prev_month(m)
+        warm_months.append(m)
+    warm_months.reverse()  # 由舊到新
+
+    def get(stock_no, mm, required=True):
+        """回傳 (payload, 來源)。required=False 時抓不到只警告不中止。"""
         try:
             if args.use_cache:
-                payload = load_cached(stock_no, month)
-                src = "快取"
-            else:
-                payload = fetch_raw(stock_no, month)
-                with open(raw_path(stock_no, month), "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
-                src = "API"
+                return load_cached(stock_no, mm), "快取"
+            payload = fetch_raw(stock_no, mm)
+            with open(raw_path(stock_no, mm), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            return payload, "API"
         except FetchError as e:
-            print("\n[中止] 取不到 %s 的股價資料：%s" % (stock_no, e), file=sys.stderr)
-            print("       沒有寫出 prices.json。請確認網路 / 月份後重跑，"
-                  "不要用其他來源的估計值填補。", file=sys.stderr)
-            sys.exit(1)
+            if required:
+                print("\n[中止] 取不到 %s %s 的股價資料：%s" % (stock_no, mm, e), file=sys.stderr)
+                print("       沒有寫出 prices.json。請確認網路 / 月份後重跑，"
+                      "不要用其他來源的估計值填補。", file=sys.stderr)
+                sys.exit(1)
+            print("  [注意] %s %s 的暖身資料取不到（%s），該股前幾天的均線會顯示 —"
+                  % (stock_no, mm, e), file=sys.stderr)
+            return None, None
+
+    out = {"month": month, "maPeriod": MA_PERIOD, "warmupMonths": warm_months, "stocks": []}
+    for i, stock_no in enumerate(stocks):
+        payload, src = get(stock_no, month, required=True)
 
         # 從 title 取股名，例如 "115年08月 2330 台積電   各日成交資訊"
         name = STOCK_NAMES.get(stock_no, "")
@@ -152,8 +179,27 @@ def main():
             name = parts[2]
 
         rows = parse(payload, stock_no)
-        out["stocks"].append({"code": stock_no, "name": name, "rows": rows})
-        print("  %s %s：%d 筆（%s）" % (stock_no, name, len(rows), src))
+
+        # 暖身：只留日期與收盤價，前端接在 rows 前面算均線
+        warm = []
+        for mm in warm_months:
+            wp, _ = get(stock_no, mm, required=False)
+            if not wp:
+                continue
+            for r in parse(wp, stock_no):
+                if r["valid"]:
+                    warm.append({"date": r["date"], "close": r["close"]})
+            if not args.use_cache:
+                time.sleep(3)
+        warm.sort(key=lambda x: x["date"])
+
+        need = MA_PERIOD - 1
+        if len(warm) < need:
+            print("  [注意] %s 暖身只有 %d 筆，不足 %d 筆，%s 月初幾天算不出 MA%d"
+                  % (stock_no, len(warm), need, month, MA_PERIOD), file=sys.stderr)
+
+        out["stocks"].append({"code": stock_no, "name": name, "rows": rows, "warmup": warm})
+        print("  %s %s：%d 筆（%s）＋ 暖身 %d 筆" % (stock_no, name, len(rows), src, len(warm)))
 
         if not args.use_cache and i < len(stocks) - 1:
             time.sleep(3)  # 對證交所客氣一點

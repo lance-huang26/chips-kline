@@ -39,6 +39,33 @@ print("Python 端：-83000 vs -80000 總分不同的天數 =", len(diff_days), d
 with open(os.path.join(ROOT, "data", "prices.json"), encoding="utf-8") as f:
     prices = json.load(f)
 
+# ---------- 1b. Python 端獨立算 MA 與乖離率 ----------
+MA_PERIOD = prices.get("maPeriod", 20)
+BIAS_ALERT = 15.0
+
+exp_bias = {}          # code -> {date: (ma, bias)}
+for st in prices["stocks"]:
+    closes, byd = [], {}
+    for w in st.get("warmup", []):
+        if w.get("close") is not None:
+            closes.append(w["close"])
+    for r in st["rows"]:
+        if not r["valid"]:
+            continue
+        closes.append(r["close"])
+        if len(closes) < MA_PERIOD:
+            byd[r["date"]] = (None, None)
+        else:
+            ma = sum(closes[-MA_PERIOD:]) / MA_PERIOD
+            byd[r["date"]] = (ma, (r["close"] - ma) / ma * 100)
+    exp_bias[st["code"]] = byd
+
+_hot = [(c, d, b) for c, m in exp_bias.items() for d, (ma, b) in m.items()
+        if b is not None and b > BIAS_ALERT]
+print("Python 端：MA%d，正乖離 > %g%% 的有 %d 筆" % (MA_PERIOD, BIAS_ALERT, len(_hot)))
+for c, d, b in sorted(_hot, key=lambda x: (x[0], x[1])):
+    print("    %s %s  %+.2f%%" % (c, d, b))
+
 # ---------- 2. 瀏覽器端 ----------
 from playwright.sync_api import sync_playwright
 
@@ -229,14 +256,27 @@ for thr in (-83000, -80000):
         got_pct = float(row[2].replace("%", "").replace("+", ""))
         if abs(got_pct - want_pct) > 0.011:
             fails.append("thr=%s %s 漲跌幅 %r != %.2f%%" % (thr, d, row[2], want_pct))
+        # MA 與乖離率（跟著目前選中的股票，預設 2330）
+        want_ma, want_bias = exp_bias[prices["stocks"][0]["code"]][d]
+        if want_ma is None:
+            if row[3] != "—" or row[4] != "—":
+                fails.append("thr=%s %s 均線不足時應顯示 —，卻是 %r / %r" % (thr, d, row[3], row[4]))
+        else:
+            got_ma = float(row[3].replace(",", ""))
+            if abs(got_ma - want_ma) > 0.011:
+                fails.append("thr=%s %s MA %s != %.2f" % (thr, d, row[3], want_ma))
+            got_bias = float(row[4].replace("%", "").replace("+", ""))
+            if abs(got_bias - want_bias) > 0.011:
+                fails.append("thr=%s %s 乖離率 %s != %.2f%%" % (thr, d, row[4], want_bias))
+
         # 每個欄位三格：口數 / 本日操作 / 票
         for k, f in enumerate(["foreign_fut", "top10_trader", "top10_specific",
                                "foreign_opt", "dealer_opt"]):
-            gv = row[3 + k * 3].replace(",", "")
+            gv = row[5 + k * 3].replace(",", "")
             if int(gv) != chips[i][f]:
                 fails.append("thr=%s %s %s 口數 %s != %s" % (thr, d, f, gv, chips[i][f]))
 
-            gd = row[4 + k * 3].replace(",", "").replace("+", "")
+            gd = row[6 + k * 3].replace(",", "").replace("+", "")
             want_d = None if i == 0 else chips[i][f] - chips[i - 1][f]
             if want_d is None:
                 if gd != "—":
@@ -244,17 +284,17 @@ for thr in (-83000, -80000):
             elif int(gd) != want_d:
                 fails.append("thr=%s %s %s 本日操作 %s != %d" % (thr, d, f, gd, want_d))
 
-            gvote = int(row[5 + k * 3])
+            gvote = int(row[7 + k * 3])
             if gvote != v[k]:
                 fails.append("thr=%s %s %s 票 %d != %d" % (thr, d, f, gvote, v[k]))
-        if int(row[18]) != fut:
-            fails.append("thr=%s %s 期貨小計 %s != %d" % (thr, d, row[18], fut))
-        if int(row[19]) != opt:
-            fails.append("thr=%s %s 選擇權小計 %s != %d" % (thr, d, row[19], opt))
-        if int(row[20]) != tot:
-            fails.append("thr=%s %s 總分 %s != %d" % (thr, d, row[20], tot))
-        if len(row) != 21:
-            fails.append("thr=%s %s 欄數 %d != 21" % (thr, d, len(row)))
+        if int(row[20]) != fut:
+            fails.append("thr=%s %s 期貨小計 %s != %d" % (thr, d, row[20], fut))
+        if int(row[21]) != opt:
+            fails.append("thr=%s %s 選擇權小計 %s != %d" % (thr, d, row[21], opt))
+        if int(row[22]) != tot:
+            fails.append("thr=%s %s 總分 %s != %d" % (thr, d, row[22], tot))
+        if len(row) != 23:
+            fails.append("thr=%s %s 欄數 %d != 23" % (thr, d, len(row)))
 
     # 圖上的總分序列
     o = results[str(thr) + "_opt"]
@@ -359,6 +399,25 @@ for idx, tip in zip([0, 5, 20], tips):
             fails.append("tooltip(第%d天) %s 的本日操作 %s 沒有緊接在口數後面" % (idx, f, want))
 print("tooltip：口數 → 本日操作 → 票 的順序與數值正確（第 1／6／21 天）")
 
+# tooltip 的乖離率區塊：三檔都要有，且 >15% 的要被標紅
+for idx, tip in zip([0, 5, 20], tips):
+    d = chips[idx]["date"]
+    if "乖離率" not in tip:
+        fails.append("tooltip(第%d天) 沒有乖離率區塊" % idx)
+        continue
+    for st in prices["stocks"]:
+        ma, bias = exp_bias[st["code"]].get(d, (None, None))
+        want = "—" if bias is None else "%s%.2f%%" % ("+" if bias > 0 else "", bias)
+        if want not in tip:
+            fails.append("tooltip(%s) 缺 %s 的乖離率 %s" % (d, st["code"], want))
+        if bias is not None and bias > BIAS_ALERT:
+            # 標紅 = 用漲色 #d93b30 且加粗
+            seg = tip[max(tip.find(want) - 260, 0): tip.find(want) + len(want) + 4]
+            if "d93b30" not in seg or "font-weight:700" not in seg:
+                fails.append("tooltip(%s) %s 乖離 %s 超過 %g%% 但沒有標紅"
+                             % (d, st["code"], want, BIAS_ALERT))
+print("tooltip：三檔乖離率皆列出，超過 %g%% 的有標紅" % BIAS_ALERT)
+
 for scheme, items in contrast.items():
     for it in items:
         if it["ratio"] < 4.5:
@@ -375,5 +434,5 @@ if fails:
     for f in fails[:40]:
         print("   -", f)
     sys.exit(1)
-print("✅ 全部通過：21 天 × 2 門檻 × 21 欄（含本日操作），表格 / tooltip / 圖表序列 / "
+print("✅ 全部通過：21 天 × 2 門檻 × 23 欄（含本日操作、MA20 與乖離率），表格 / tooltip / 圖表序列 / "
       "背景色塊 / markLine / 副圖雙軸對齊 / 顏色與對比 皆與 Python 獨立計算一致")

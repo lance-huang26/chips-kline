@@ -8,6 +8,9 @@
   var SETTLEMENT = ['2026/08/19'];          // 台指期結算日
   var DEFAULT_THRESHOLD = -83000;
 
+  var MA_PERIOD = 20;      // 乖離率的均線天數（月線）；prices.json 的 maPeriod 會覆蓋它
+  var BIAS_ALERT = 15;     // 正乖離超過這個百分比就標紅
+
   var CHIP_FIELDS = [
     { key: 'foreign_fut',    label: '外資台指期未平倉',   short: '外資期貨', color: '#2a78d6', axis: 'big'   },
     { key: 'top10_trader',   label: '前十大交易人',       short: '前十大交易人', color: '#eb6834', axis: 'small' },
@@ -28,7 +31,8 @@
     primary: null,
     compare: false,
     threshold: DEFAULT_THRESHOLD,
-    shown: {}              // key -> bool
+    shown: {},             // key -> bool
+    bias: {}               // code -> { date: {ma, bias} }
   };
   CHIP_FIELDS.forEach(function (f) { S.shown[f.key] = true; });
 
@@ -147,6 +151,46 @@
       left:  { min: -best.k * best.iv, max: (N - best.k) * best.iv, interval: best.iv },
       right: { min: S.threshold - best.k * ivR, max: S.threshold + (N - best.k) * ivR, interval: ivR }
     };
+  }
+
+  /* 乖離率 = (收盤 − MA) / MA × 100%
+   * MA 用「往前推 MA_PERIOD 個有交易的收盤價」算，所以 8/3 的 MA20 需要 7 月的資料，
+   * prices.json 裡每檔股票的 warmup 就是為此準備的（只有日期與收盤價）。
+   * 停牌／無交易的日子不佔均線的位置，也不會產生乖離率。
+   */
+  function computeBias() {
+    var out = {};
+    S.prices.stocks.forEach(function (st) {
+      var closes = [], dates = [];
+      (st.warmup || []).forEach(function (w) {
+        if (w.close !== null && w.close !== undefined) { closes.push(w.close); dates.push(w.date); }
+      });
+      var byDate = {};
+      st.rows.forEach(function (r) {
+        if (!r.valid) return;
+        closes.push(r.close); dates.push(r.date);
+        var n = closes.length;
+        if (n < MA_PERIOD) { byDate[r.date] = { ma: null, bias: null }; return; }
+        var sum = 0;
+        for (var i = n - MA_PERIOD; i < n; i++) sum += closes[i];
+        var ma = sum / MA_PERIOD;
+        byDate[r.date] = { ma: ma, bias: ma ? (r.close - ma) / ma * 100 : null };
+      });
+      out[st.code] = byDate;
+    });
+    return out;
+  }
+  function biasAt(code, date) {
+    var b = S.bias[code];
+    return (b && b[date]) ? b[date] : { ma: null, bias: null };
+  }
+  function biasClass(bias) {
+    if (bias === null || bias === undefined) return '';
+    return bias > BIAS_ALERT ? 'hot' : '';
+  }
+  function fmtBias(bias) {
+    if (bias === null || bias === undefined) return '—';
+    return (bias > 0 ? '+' : '') + bias.toFixed(2) + '%';
   }
 
   function stockByCode(code) {
@@ -526,6 +570,33 @@
     }
     h += '</div>';
 
+    // 三檔的乖離率（相對 MA20），正乖離超過門檻標紅
+    h += '<div style="padding:7px 11px;border-bottom:1px solid #ececE8">' +
+         '<div style="color:#807e78;font-size:11px;margin-bottom:3px">乖離率（MA' + MA_PERIOD +
+         '，>' + BIAS_ALERT + '% 標紅）</div>' +
+         '<table style="font-size:11.5px;border-spacing:0">' +
+         '<tr style="color:#a09e97;font-size:10.5px"><td></td>' +
+         '<td style="padding:0 8px 2px 0;text-align:right">收盤</td>' +
+         '<td style="padding:0 8px 2px 0;text-align:right">MA' + MA_PERIOD + '</td>' +
+         '<td style="padding:0 0 2px;text-align:right">乖離率</td></tr>';
+    S.prices.stocks.forEach(function (s2) {
+      var r2 = alignedRows(s2)[idx];
+      var bi = biasAt(s2.code, d);
+      var hot = bi.bias !== null && bi.bias > BIAS_ALERT;
+      h += '<tr' + (s2.code === S.primary ? ' style="font-weight:600"' : '') + '>' +
+        '<td style="padding:1px 8px 1px 0">' + s2.code + ' ' + s2.name + '</td>' +
+        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums">' +
+          (r2 ? fmt(r2.close, 2) : '—') + '</td>' +
+        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;color:#807e78">' +
+          (bi.ma === null ? '—' : fmt(bi.ma, 2)) + '</td>' +
+        '<td style="padding:1px 0;text-align:right;font-variant-numeric:tabular-nums;' +
+          (hot ? 'color:' + UP + ';font-weight:700'
+               : 'color:' + (bi.bias === null ? '#a09e97' : bi.bias < 0 ? DOWN : '#52514e')) + '">' +
+          fmtBias(bi.bias) + (hot ? ' ▲' : '') + '</td>' +
+        '</tr>';
+    });
+    h += '</table></div>';
+
     // 五票
     h += '<div style="padding:7px 11px 3px"><table style="font-size:11.5px;border-spacing:0">';
     h += '<tr style="color:#a09e97;font-size:10.5px"><td></td>' +
@@ -571,7 +642,8 @@
     var thead = el('dataTable').tHead, tbody = el('dataTable').tBodies[0];
 
     var h1 = '<tr><th class="date" rowspan="2">日期</th>' +
-             '<th rowspan="2">收盤</th><th rowspan="2">漲跌幅</th>';
+             '<th rowspan="2">收盤</th><th rowspan="2">漲跌幅</th>' +
+             '<th rowspan="2">MA' + MA_PERIOD + '</th><th rowspan="2">乖離率</th>';
     CHIP_FIELDS.forEach(function (f) { h1 += '<th class="grp" colspan="3">' + f.short + '</th>'; });
     h1 += '<th class="sep" rowspan="2">期貨小計</th><th rowspan="2">選擇權小計</th><th rowspan="2">總分</th></tr>';
     var h2 = '<tr>';
@@ -593,6 +665,12 @@
         '<td>' + (r ? fmt(r.close, 2) : '—') + '</td>' +
         '<td class="' + (pct === null ? '' : cls(pct)) + '">' +
           (pct === null ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%') + '</td>';
+
+      var bi = biasAt(S.primary, d);
+      body += '<td class="ma">' + (bi.ma === null ? '—' : fmt(bi.ma, 2)) + '</td>' +
+              '<td class="bias ' + biasClass(bi.bias) +
+                (bi.bias !== null && bi.bias < 0 ? ' neg' : '') + '">' +
+                fmtBias(bi.bias) + '</td>';
 
       CHIP_FIELDS.forEach(function (f, k) {
         var v = s.votes[k], dd = dayDelta(i, f.key);
@@ -622,6 +700,8 @@
     S.chips = parseChipsCsv(data.chipsText);
     S.dates = S.chips.map(function (c) { return c.date; });
     S.primary = S.prices.stocks[0].code;
+    if (S.prices.maPeriod) MA_PERIOD = S.prices.maPeriod;
+    S.bias = computeBias();
 
     el('dayCount').textContent = S.dates.length;
     checkAlignment();
