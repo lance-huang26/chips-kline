@@ -5,11 +5,15 @@
   'use strict';
 
   // ---------------------------------------------------------------- 設定
-  var SETTLEMENT = ['2026/08/19'];          // 台指期結算日
+  // 以下都是預設值，載入 data/site.json 之後會被裡面的設定覆蓋。
+  // 真正的設定在 config.json，由 build_site.py 寫進 site.json。
+  var SETTLEMENT = [];     // 台指期結算日（build_site.py 依每月第三個星期三推算）
   var DEFAULT_THRESHOLD = -83000;
-
-  var MA_PERIOD = 20;      // 乖離率的均線天數（月線）；prices.json 的 maPeriod 會覆蓋它
+  var THRESHOLD_PRESETS = [-83000, -80000];
+  var MA_PERIOD = 20;      // 乖離率的均線天數（月線）
   var BIAS_ALERT = 15;     // 正乖離超過這個百分比就標紅
+  var WINDOW_OPTIONS = [20, 60, 120, 0];   // 0 = 全部
+  var DEFAULT_WINDOW = 60;
 
   var CHIP_FIELDS = [
     { key: 'foreign_fut',    label: '外資台指期未平倉',   short: '外資期貨', color: '#2a78d6', axis: 'big'   },
@@ -25,8 +29,12 @@
 
   // ---------------------------------------------------------------- 狀態
   var S = {
-    prices: null,          // {month, stocks:[{code,name,rows:[]}]}
-    chips: null,           // [{date, foreign_fut, ...}]
+    site: null,            // data/site.json 的完整內容
+    prices: null,          // {stocks:[{code,name,rows:[]}]}（rows 是全部歷史）
+    allChips: [],          // 全部歷史的籌碼
+    chips: [],             // 目前視窗內的籌碼（allChips 的尾段）
+    startIdx: 0,           // 視窗起點在 allChips 裡的位置
+    win: DEFAULT_WINDOW,   // 視窗天數，0 = 全部
     dates: [],
     primary: null,
     compare: false,
@@ -47,10 +55,13 @@
   }
   function sign(n) { return (n > 0 ? '+' : '') + n; }
 
-  // 本日操作＝今日未平倉／淨口數 減 昨日。第一天沒有前一日可比，回傳 null。
+  // 本日操作＝今日未平倉／淨口數 減 昨日。
+  // 比較的對象是「歷史上的前一個交易日」而不是「視窗裡的前一列」，
+  // 所以把區間切成最近 20 天時，第一天照樣算得出來。
   function dayDelta(i, key) {
-    if (i === 0) return null;
-    return S.chips[i][key] - S.chips[i - 1][key];
+    var g = S.startIdx + i;
+    if (g === 0) return null;            // 整個歷史的第一天，真的沒有前一日
+    return S.allChips[g][key] - S.allChips[g - 1][key];
   }
   function fmtDelta(d) {
     if (d === null) return '—';
@@ -59,17 +70,13 @@
   function cls(n) { return n > 0 ? 'pos' : (n < 0 ? 'neg' : ''); }
   function el(id) { return document.getElementById(id); }
 
-  function parseChipsCsv(text) {
-    var lines = text.replace(/\r/g, '').split('\n').filter(function (l) { return l.trim(); });
-    var head = lines[0].split(',').map(function (s) { return s.trim(); });
-    return lines.slice(1).map(function (line) {
-      var c = line.split(',');
-      var o = {};
-      head.forEach(function (h, i) {
-        o[h] = (h === 'date') ? c[i].trim() : parseFloat(c[i]);
-      });
-      return o;
-    });
+  // 依目前的視窗天數，從全部歷史裡切出要顯示的那一段
+  function applyWindow() {
+    var n = S.allChips.length;
+    var keep = (S.win && S.win > 0) ? Math.min(S.win, n) : n;
+    S.startIdx = n - keep;
+    S.chips = S.allChips.slice(S.startIdx);
+    S.dates = S.chips.map(function (c) { return c.date; });
   }
 
   // ---------------------------------------------------------------- 計分
@@ -211,31 +218,29 @@
 
   // ---------------------------------------------------------------- 載入
   function loadData() {
-    var viaFetch = Promise.all([
-      fetch('data/prices.json').then(function (r) { if (!r.ok) throw new Error('prices'); return r.json(); }),
-      fetch('data/chips.csv').then(function (r) { if (!r.ok) throw new Error('chips'); return r.text(); })
-    ]).then(function (a) { return { prices: a[0], chipsText: a[1] }; });
-
-    return viaFetch.catch(function () {
-      // file:// 直開時 fetch 會被 CORS 擋掉 → 用 data/*.js 的離線備援
-      if (window.__PRICES__ && window.__CHIPS_CSV__) {
-        return { prices: window.__PRICES__, chipsText: window.__CHIPS_CSV__ };
-      }
-      throw new Error('NO_DATA');
-    });
+    return fetch('data/site.json')
+      .then(function (r) { if (!r.ok) throw new Error('site'); return r.json(); })
+      .catch(function () {
+        // file:// 直開時 fetch 會被 CORS 擋掉 → 用 data/site.js 的離線備援
+        if (window.__SITE__) return window.__SITE__;
+        throw new Error('NO_DATA');
+      });
   }
 
   // ---------------------------------------------------------------- 交易日檢查
   function checkAlignment() {
-    var chipDates = S.chips.map(function (c) { return c.date; });
+    // 只檢查「有籌碼的那些日子有沒有對應的股價」。
+    // 股價會比籌碼多出前面幾個月（均線暖身用），那是正常的，不算對不上。
+    var chipDates = S.allChips.map(function (c) { return c.date; });
     var msgs = [];
     S.prices.stocks.forEach(function (st) {
-      var pd = st.rows.map(function (r) { return r.date; });
-      var onlyPrice = pd.filter(function (d) { return chipDates.indexOf(d) < 0; });
-      var onlyChip = chipDates.filter(function (d) { return pd.indexOf(d) < 0; });
-      if (onlyPrice.length || onlyChip.length) {
-        msgs.push(st.code + ' ' + st.name + '：只有股價有 [' + onlyPrice.join(', ') +
-                  ']，只有籌碼有 [' + onlyChip.join(', ') + ']');
+      var pd = {};
+      st.rows.forEach(function (r) { pd[r.date] = true; });
+      var onlyChip = chipDates.filter(function (d) { return !pd[d]; });
+      if (onlyChip.length) {
+        msgs.push(st.code + ' ' + st.name + '：有籌碼但缺股價的日子 [' +
+                  onlyChip.slice(0, 8).join(', ') +
+                  (onlyChip.length > 8 ? ' …共 ' + onlyChip.length + ' 天' : '') + ']');
       }
     });
     if (msgs.length) {
@@ -248,6 +253,24 @@
 
   // ---------------------------------------------------------------- 控制列
   function buildControls() {
+    var wseg = el('winSeg');
+    wseg.innerHTML = '';
+    WINDOW_OPTIONS.forEach(function (n) {
+      var b = document.createElement('button');
+      b.textContent = n > 0 ? ('最近 ' + n + ' 日') : '全部';
+      b.dataset.win = n;
+      b.className = (n === S.win) ? 'on' : '';
+      b.onclick = function () {
+        S.win = n;
+        Array.prototype.forEach.call(wseg.children, function (c) {
+          c.className = (Number(c.dataset.win) === S.win) ? 'on' : '';
+        });
+        applyWindow();
+        render();
+      };
+      wseg.appendChild(b);
+    });
+
     var seg = el('stockSeg');
     seg.innerHTML = '';
     S.prices.stocks.forEach(function (st) {
@@ -306,13 +329,15 @@
     var pos = 0, neg = 0, zero = 0;
     sc.forEach(function (s) { if (s.total > 0) pos++; else if (s.total < 0) neg++; else zero++; });
 
-    var a = scoreAll(-83000), b = scoreAll(-80000), diff = [];
+    var p0 = THRESHOLD_PRESETS[0], p1 = THRESHOLD_PRESETS[1];
+    var a = scoreAll(p0), b = scoreAll(p1), diff = [];
     for (var i = 0; i < a.length; i++) {
       if (a[i].total !== b[i].total) diff.push(S.dates[i]);
     }
 
     var st = stockByCode(S.primary);
-    var rows = st.rows.filter(function (r) { return r.valid; });
+    // 報酬率只看目前視窗內的期間，不是全部歷史
+    var rows = alignedRows(st).filter(function (r) { return r; });
     var ret = rows.length > 1
       ? (rows[rows.length - 1].close / rows[0].close - 1) * 100 : null;
 
@@ -322,16 +347,19 @@
       card('總分 = 0 天數', String(zero), ''),
       card('平均總分', (sc.reduce(function (t, s) { return t + s.total; }, 0) / sc.length).toFixed(2),
            cls(sc.reduce(function (t, s) { return t + s.total; }, 0))),
-      card(st.code + ' ' + st.name + ' 月報酬',
+      card(st.code + ' ' + st.name + ' 區間報酬',
            (ret === null ? '—' : (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%'),
            ret === null ? '' : cls(ret)),
-      card('門檻 -83000 vs -80000', diff.length + '<small> 天不同</small>', '')
+      card('門檻 ' + fmt(p0) + ' vs ' + fmt(p1), diff.length + '<small> 天不同</small>', '')
     ].join('');
 
+    var few = diff.length <= 12;
     el('thrNote').innerHTML = diff.length
-      ? '目前 <b>-83000</b> 與 <b>-80000</b> 兩個門檻，總分不同的有 <b>' + diff.length +
-        '</b> 天：' + diff.join('、') + '（差異全部來自第 1 票的正負翻轉）。'
-      : '<b>-83000</b> 與 <b>-80000</b> 兩個門檻在本期間內判讀完全相同。';
+      ? '目前 <b>' + fmt(p0) + '</b> 與 <b>' + fmt(p1) + '</b> 兩個門檻，總分不同的有 <b>' +
+        diff.length + '</b> 天' +
+        (few ? '：' + diff.join('、') : '（區間較長，日期請看下方表格）') +
+        '（差異全部來自第 1 票的正負翻轉）。'
+      : '<b>' + fmt(p0) + '</b> 與 <b>' + fmt(p1) + '</b> 兩個門檻在本區間內判讀完全相同。';
   }
   function card(k, v, c) {
     return '<div class="stat"><div class="k">' + k + '</div><div class="v ' + (c || '') + '">' + v + '</div></div>';
@@ -687,23 +715,41 @@
   }
 
   // ---------------------------------------------------------------- render
+  function renderHeader() {
+    var n = S.dates.length, all = S.allChips.length;
+    el('rangeLabel').textContent = n
+      ? S.dates[0] + ' – ' + S.dates[n - 1] + '（' + n + ' 個交易日' +
+        (n < all ? '，歷史共 ' + all + ' 天' : '') + '）'
+      : '沒有資料';
+    var g = S.site && S.site.generated;
+    el('genLabel').textContent = g ? ('資料更新於 ' + g.replace('T', ' ').replace('Z', ' UTC')) : '';
+  }
+
   function render() {
     var sc = scoreAll(S.threshold);
+    renderHeader();
     renderStats(sc);
     chart.setOption(buildOption(sc), true);
     renderTable(sc);
   }
 
   // ---------------------------------------------------------------- 啟動
-  function boot(data) {
-    S.prices = data.prices;
-    S.chips = parseChipsCsv(data.chipsText);
-    S.dates = S.chips.map(function (c) { return c.date; });
-    S.primary = S.prices.stocks[0].code;
-    if (S.prices.maPeriod) MA_PERIOD = S.prices.maPeriod;
-    S.bias = computeBias();
+  function boot(site) {
+    S.site = site;
+    S.prices = { stocks: site.stocks };
+    S.allChips = site.chips;
+    S.primary = site.stocks[0].code;
 
-    el('dayCount').textContent = S.dates.length;
+    if (site.maPeriod) MA_PERIOD = site.maPeriod;
+    if (site.biasAlert) BIAS_ALERT = site.biasAlert;
+    if (site.settlements) SETTLEMENT = site.settlements;
+    if (site.thresholdPresets) THRESHOLD_PRESETS = site.thresholdPresets;
+    if (site.windowOptions) WINDOW_OPTIONS = site.windowOptions;
+    if (site.defaultWindow !== undefined) { DEFAULT_WINDOW = site.defaultWindow; S.win = DEFAULT_WINDOW; }
+    if (site.defaultThreshold !== undefined) { DEFAULT_THRESHOLD = site.defaultThreshold; }
+
+    applyWindow();
+    S.bias = computeBias();      // 均線用全部歷史算，不受視窗影響
     checkAlignment();
 
     chart = echarts.init(el('chart'), null, { renderer: 'canvas' });

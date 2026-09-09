@@ -1,0 +1,14 @@
+{
+  "stocks": [
+    { "code": "2330", "name": "台積電" },
+    { "code": "2308", "name": "台達電" },
+    { "code": "2368", "name": "金像電" }
+  ],
+  "maPeriod": 20,
+  "biasAlert": 15,
+  "defaultThreshold": -83000,
+  "thresholdPresets": [-83000, -80000],
+  "defaultWindow": 60,
+  "windowOptions": [20, 60, 120, 0],
+  "settlementOverrides": {}
+}

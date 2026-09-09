@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # ---------- 1. Python 端獨立計分 ----------
-with open(os.path.join(ROOT, "data", "chips.csv"), encoding="utf-8") as f:
+with open(os.path.join(ROOT, "data", "history", "chips.csv"), encoding="utf-8") as f:
     chips = list(csv.DictReader(f))
 for c in chips:
     for k in c:
@@ -36,8 +36,8 @@ diff_days = [chips[i]["date"] for i in range(len(chips))
              if exp[-83000][i][3] != exp[-80000][i][3]]
 print("Python 端：-83000 vs -80000 總分不同的天數 =", len(diff_days), diff_days)
 
-with open(os.path.join(ROOT, "data", "prices.json"), encoding="utf-8") as f:
-    prices = json.load(f)
+with open(os.path.join(ROOT, "data", "site.json"), encoding="utf-8") as f:
+    prices = json.load(f)          # 現在前端只讀 site.json
 
 # ---------- 1b. Python 端獨立算 MA 與乖離率 ----------
 MA_PERIOD = prices.get("maPeriod", 20)
@@ -45,10 +45,8 @@ BIAS_ALERT = 15.0
 
 exp_bias = {}          # code -> {date: (ma, bias)}
 for st in prices["stocks"]:
+    # site.json 的 rows 已經含全部歷史（含均線暖身用的更早月份），不再有 warmup
     closes, byd = [], {}
-    for w in st.get("warmup", []):
-        if w.get("close") is not None:
-            closes.append(w["close"])
     for r in st["rows"]:
         if not r["valid"]:
             continue
@@ -168,6 +166,23 @@ with sync_playwright() as pw:
         set_thr(thr)
         toggle_cases.append((off, thr,
             pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")))
+
+    # 區間切換：切到「最近 20 日」應該只剩 20 列，
+    # 而且第一列的「本日操作」不能是 —（要跟歷史上的前一天比，不是跟視窗第一天比）
+    win_cases = {}
+    for n in (20, 0):
+        pg.evaluate("""(n) => {
+              const b = [...document.querySelectorAll('#winSeg button')]
+                        .find(x => Number(x.dataset.win) === n);
+              if (b) b.click();
+            }""", n)
+        pg.wait_for_timeout(150)
+        t = read_table()
+        win_cases[n] = {"rows": len(t), "first_date": t[0][0].split()[0],
+                        "first_delta": t[0][6], "last_date": t[-1][0].split()[0]}
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                           .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
+    pg.wait_for_timeout(150)
 
     # tooltip 實際輸出（formatter 是函式，JSON 序列化會掉，所以在頁面裡直接呼叫）
     set_thr(-83000)
@@ -344,8 +359,9 @@ for thr in (-83000, -80000):
             fails.append("漲的顏色不是紅色")
         if ck[0]["itemStyle"]["color0"].lower() != "#12996b":
             fails.append("跌的顏色不是綠色")
+        # 圖上的第一根 K 棒對應的是「視窗第一天」，不是股價歷史的第一天
         first = ck[0]["data"][0]
-        p0 = prices["stocks"][0]["rows"][0]
+        p0 = price_by_date[chips[0]["date"]]
         if first != [p0["open"], p0["close"], p0["low"], p0["high"]]:
             fails.append("K 棒 OHLC 順序不對：%s" % first)
     # 副圖：foreign_fut 獨立 y 軸
@@ -378,6 +394,30 @@ for off, thr, opt in toggle_cases:
     fails += check_sub_axes(opt, thr, [k for k in SMALL_KEYS if k not in off],
                             "關掉%s @門檻%s" % (off or ["無"], thr))
 print("副圖雙軸對齊：%d 種門檻/勾選組合皆通過" % (2 + len(toggle_cases)))
+
+# 區間切換
+w20, wall = win_cases[20], win_cases[0]
+if wall["rows"] != len(chips):
+    fails.append("「全部」應該顯示 %d 列，實得 %d" % (len(chips), wall["rows"]))
+if w20["rows"] != min(20, len(chips)):
+    fails.append("「最近 20 日」應該顯示 %d 列，實得 %d" % (min(20, len(chips)), w20["rows"]))
+if w20["last_date"] != chips[-1]["date"]:
+    fails.append("視窗應該對齊到最新的一天，實得 %s" % w20["last_date"])
+if len(chips) > 20:
+    if w20["first_date"] != chips[len(chips) - 20]["date"]:
+        fails.append("「最近 20 日」的起點不對：%s" % w20["first_date"])
+    if w20["first_delta"] == "—":
+        fails.append("切窗後第一列的本日操作不該是 —，"
+                     "應該跟歷史上的前一個交易日比（%s）" % w20["first_date"])
+    else:
+        f = chips[len(chips) - 20]
+        prev = chips[len(chips) - 21]
+        want = f["foreign_fut"] - prev["foreign_fut"]
+        got = int(w20["first_delta"].replace(",", "").replace("+", ""))
+        if got != want:
+            fails.append("切窗後第一列本日操作 %d != %d" % (got, want))
+print("區間切換：全部 %d 列 / 最近 20 日 %d 列，切窗後第一列仍與歷史前一日相比"
+      % (wall["rows"], w20["rows"]))
 
 # tooltip：口數與票數之間要出現「本日操作」，順序不能跑掉
 import html as _html

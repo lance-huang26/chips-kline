@@ -10,11 +10,17 @@
 
 <header class="page-head">
   <h1>法人籌碼五票 × 個股 K 線疊圖</h1>
-  <p class="sub">2026/08/03 – 2026/08/31 ・ 共 <span id="dayCount">–</span> 個交易日 ・
-     籌碼來源：期交所三大法人、期貨大額交易人未沖銷部位結構表、選擇權（玩股網）</p>
+  <p class="sub"><span id="rangeLabel">載入中…</span> ・
+     籌碼來源：期交所三大法人（期貨／選擇權）與期貨大額交易人未沖銷部位結構表</p>
+  <p class="sub gen"><span id="genLabel"></span></p>
 </header>
 
 <section class="controls" id="controls">
+  <div class="ctl-block">
+    <div class="ctl-label">顯示區間</div>
+    <div class="seg" id="winSeg"></div>
+  </div>
+
   <div class="ctl-block">
     <div class="ctl-label">主要標的（K 線）</div>
     <div class="seg" id="stockSeg"></div>
@@ -53,8 +59,9 @@
   </div>
   <p class="foot-note">
     註：<b>外資台指期未平倉</b>為純大台（TX）口徑；<b>前十大交易人／特定人</b>為期交所
-    <code>TX + MTX/4 + TMF/20</code> 的所有契約合併口徑（小台、微台已換算併入）。
+    <code>TX + MTX/4 + TMF/20</code> 的所有契約合併口徑（期交所在 TX 底下公布的即為此合併值）。
     兩者口徑不同，本頁只各自獨立呈現與投票，<b>不做相加減</b>。
+    <b>選擇權淨口數</b>為買權未平倉淨額減賣權未平倉淨額。
     停牌或無交易的日子 K 棒留空，不以前一日補值。
   </p>
 </section>
@@ -68,9 +75,8 @@
     document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"><\/scr' + 'ipt>');
   }
 </script>
-<!-- 直接用 file:// 開啟時 fetch 會被瀏覽器擋住，以下兩支是同一份資料的離線備援 -->
-<script src="data/prices.js"></script>
-<script src="data/chips.js"></script>
+<!-- 直接用 file:// 開啟時 fetch 會被瀏覽器擋住，這支是同一份資料的離線備援 -->
+<script src="data/site.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

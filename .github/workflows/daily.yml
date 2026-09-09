@@ -1,0 +1,87 @@
+name: 每日更新籌碼與股價
+
+# 第一階段刻意只留手動觸發。
+# 先按一次 Run workflow 確認 GitHub 的海外 IP 沒有被證交所／期交所擋掉，
+# 確認可行之後再把下面的 schedule 取消註解。
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "指定日期 YYYY/MM/DD（留空 = 今天）"
+        required: false
+      from:
+        description: "回填起日 YYYY/MM/DD（要和 to 一起給）"
+        required: false
+      to:
+        description: "回填迄日 YYYY/MM/DD"
+        required: false
+      force:
+        description: "覆寫已存在的日期"
+        type: boolean
+        default: false
+
+  # 確認可行後再打開這段。cron 是 UTC，台灣是 UTC+8：
+  #   0 8  = 台北 16:00（收盤資料都出來之後）
+  #   0 10 = 台北 18:00（補抓，公布延遲時用）
+  # 腳本是冪等的，所以兩次都跑不會有問題。
+  # schedule:
+  #   - cron: "0 8 * * 1-5"
+  #   - cron: "0 10 * * 1-5"
+
+concurrency:
+  group: daily-update           # 兩個排程重疊時不要同時 push
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          # 全部只用標準庫，所以不需要 pip install
+
+      - name: 先跑測試（解析器與流程）
+        run: |
+          python3 tests/test_taifex.py
+          python3 tests/test_update_daily.py
+
+      - name: 抓取並更新
+        id: update
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.from }}" ]; then
+            ARGS="--from ${{ inputs.from }} --to ${{ inputs.to }}"
+          elif [ -n "${{ inputs.date }}" ]; then
+            ARGS="--date ${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          # 排程跑的時候才檢查資料是不是太久沒更新
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ARGS="$ARGS --max-stale-days 5"
+          fi
+          echo "執行：python3 update_daily.py $ARGS"
+          python3 update_daily.py $ARGS
+
+      - name: commit 並 push
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "沒有任何變動，不需要 commit。"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "資料更新 $(TZ=Asia/Taipei date '+%Y/%m/%d')"
+          # 兩個排程若重疊，另一個可能已經先 push
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            echo "push 失敗，重試 $i"
+            sleep 5
+          done
+          exit 1

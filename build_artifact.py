@@ -19,15 +19,14 @@ body = re.sub(r'<script src="(data/[^"]+|app\.js)"></script>', "", body)
 body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
 title = re.search(r"<title>(.*?)</title>", html, re.S).group(1)
 
-prices = json.loads(read("data", "prices.json"))
-chips = read("data", "chips.csv")
+site = json.loads(read("data", "site.json"))
 
 out = []
 out.append("<title>%s</title>" % title)
 out.append("<style>\n%s</style>" % read("style.css"))
 out.append(body.strip())  # body 末尾已含 echarts CDN 標籤 + jsdelivr 備援，順序不能動
-out.append("<script>window.__PRICES__ = %s;\nwindow.__CHIPS_CSV__ = %s;</script>"
-           % (json.dumps(prices, ensure_ascii=False), json.dumps(chips, ensure_ascii=False)))
+out.append("<script>window.__SITE__ = %s;</script>"
+           % json.dumps(site, ensure_ascii=False, separators=(",", ":")))
 out.append("<script>\n%s</script>" % read("app.js"))
 
 os.makedirs(os.path.join(HERE, "dist"), exist_ok=True)
