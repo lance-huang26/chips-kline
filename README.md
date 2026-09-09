@@ -75,7 +75,6 @@ python3 update_daily.py --dry-run              # 只抓不寫
 
 * GitHub 的排程**不保證準時**，尖峰時段可能延遲數十分鐘，18:00 那次補跑就是為了這個。
 * repo 連續 **60 天沒有任何活動**時，GitHub 會自動停用排程並寄信通知。
-  正常情況下 bot 每天 commit 資料就算活動，所以不會觸發；但如果停了一段時間要留意。
 
 bot 每天會 commit 回 repo，所以你本機有未推的 commit 時 `git push` 會被擋。
 這個 repo 已經設好 `pull.rebase true`，直接 `git pull` 再 push 即可。
@@ -151,3 +150,21 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 `config.json`：股票清單、`maPeriod`、`biasAlert`、門檻預設值與快速切換、
 區間選項、`settlementOverrides`（結算日預設取每月第三個星期三，放假順延到下一個交易日）。
 改完跑 `python3 build_site.py`。
+
+### 新增股票
+
+籌碼那五欄是大盤層級的，和個股無關，所以加股票只影響 K 線那一半。
+
+1. 把股票加進 `config.json` 的 `stocks`。
+2. **補抓它的歷史股價**——這步不能省。`update_daily.py` 對「已經有籌碼」的日子
+   會整天略過，所以新股票的歷史股價不會自己被補上：
+
+   ```bash
+   python3 fetch_prices.py --months-back 6 && python3 build_site.py
+   ```
+
+   或在 GitHub Actions 上手動觸發，把 `prices_months` 填 6。
+
+補抓之前 `build_site.py` 會警告該股票「股價 0 筆」但**不會中止**——
+因為 workflow 是先跑測試（會呼叫 build_site）再補抓股價，中止的話就永遠補不到了。
+畫面上那檔的 K 棒會是空的，補完就正常。

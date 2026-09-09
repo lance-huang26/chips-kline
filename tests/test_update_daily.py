@@ -45,7 +45,17 @@ if fails:
     print("❌", fails[0]); sys.exit(1)
 
 cfg = update_daily.build_site.load_config()
-NEW = "2026/09/01"
+
+# 「新的一天」要從現有歷史推出來，不能寫死日期——
+# 歷史每天都在長，寫死的話總有一天會撞到已經存在的日子，測試就會莫名其妙壞掉。
+import datetime as _dt
+_last = store.read_chips()[-1]["date"]
+_d = _dt.date(int(_last[:4]), int(_last[5:7]), int(_last[8:10])) + _dt.timedelta(days=1)
+while _d.weekday() >= 5:                      # 跳過週末
+    _d += _dt.timedelta(days=1)
+NEW = _d.strftime("%Y/%m/%d")
+NEW_ROC = "%d/%02d/%02d" % (_d.year - 1911, _d.month, _d.day)
+
 CHIP = {"date": NEW, "foreign_fut": -81000, "top10_trader": 500,
         "top10_specific": -300, "foreign_opt": 120, "dealer_opt": -80,
         "_raw": {"fut": "<table></table>", "opt": "<table></table>",
@@ -54,8 +64,8 @@ CHIP = {"date": NEW, "foreign_fut": -81000, "top10_trader": 500,
 
 
 def fake_stock_day(code, month, retries=3):
-    return {"stat": "OK", "title": "115年09月 %s 測試" % code,
-            "data": [["115/09/01", "1,000", "2,000", "100.00", "110.00",
+    return {"stat": "OK", "title": "%s 測試" % code,
+            "data": [[NEW_ROC, "1,000", "2,000", "100.00", "110.00",
                       "90.00", "105.00", "+5.00", "50", ""]]}
 
 
@@ -110,23 +120,31 @@ print("  參數解析：--to 留空 = 今天、--days N、--from 優先、只給
 calls = []
 
 
+_cache_days = [_d + _dt.timedelta(days=k) for k in range(3)]
+_cache_dates = [x.strftime("%Y/%m/%d") for x in _cache_days]
+
+
 def counting(code, month, retries=3):
     calls.append((code, month))
     return {"stat": "OK", "title": "t", "data": [
-        ["115/09/%02d" % d, "1", "2", "1.00", "1.00", "1.00", "1.00", "0.00", "1", ""]
-        for d in range(1, 11)]}
+        ["%d/%02d/%02d" % (x.year - 1911, x.month, x.day),
+         "1", "2", "1.00", "1.00", "1.00", "1.00", "0.00", "1", ""]
+        for x in _cache_days]}
 
 
 update_daily._PRICE_CACHE.clear()
 fetch_prices.fetch_raw = counting
 codes = [s["code"] for s in cfg["stocks"]]
-for day in ("2026/09/01", "2026/09/02", "2026/09/03"):
+for day in _cache_dates:
     got, why = update_daily.prices_for_date(day, codes)
     check(got is not None, "%s 應該抓得到股價（%s）" % (day, why))
-check(len(calls) == len(codes),
-      "三天只該抓 %d 次（每檔一個月份），實得 %d 次" % (len(codes), len(calls)))
+_months = {d[:4] + d[5:7] for d in _cache_dates}
+check(len(calls) == len(codes) * len(_months),
+      "%d 天只該抓 %d 次（每檔每個月份一次），實得 %d 次"
+      % (len(_cache_dates), len(codes) * len(_months), len(calls)))
 check(len(set(calls)) == len(calls), "快取失效，同一個 (股票, 月份) 被抓了不只一次")
-print("  股價快取：3 個日期共用 1 次月檔請求／檔（回填 60 天可省下約 120 次請求）")
+print("  股價快取：%d 個日期共用 %d 次月檔請求（回填 120 天可省下數百次請求）"
+      % (len(_cache_dates), len(calls)))
 update_daily._PRICE_CACHE.clear()
 
 
@@ -138,8 +156,9 @@ def boom(*a, **k):
 before = snapshot()
 taifex.fetch_day = boom
 fetch_prices.fetch_raw = boom
-old_status = update_daily.one_day("2026/08/31", cfg)
-check(old_status[0] == "skipped", "已存在的日期應該 skipped，實得 %s" % (old_status,))
+old_status = update_daily.one_day(_last, cfg)   # 歷史最後一天，一定已存在
+check(old_status[0] == "skipped",
+      "已存在的日期 %s 應該 skipped，實得 %s" % (_last, old_status))
 check(snapshot() == before, "skipped 時歷史檔不該被改動")
 
 # 2) 籌碼尚未公布 → pending，不是失敗
@@ -153,8 +172,8 @@ check(snapshot() == before, "pending 時歷史檔不該被改動")
 
 # 3) 籌碼有了但股價還沒 → 仍然 pending，籌碼不可以先寫進去
 def no_price(code, month, retries=3):
-    return {"stat": "OK", "title": "t", "data": [
-        ["115/08/31", "1", "2", "1.00", "1.00", "1.00", "1.00", "0.00", "1", ""]]}
+    # 回傳的月檔裡就是沒有 NEW 那天
+    return {"stat": "OK", "title": "t", "data": []}
 
 
 status, msg = run(lambda date, **k: dict(CHIP), no_price)
@@ -186,7 +205,7 @@ check(len(prices) == n_prices_before + len(cfg["stocks"]),
 row = [c for c in chips if c["date"] == NEW]
 check(len(row) == 1 and row[0]["foreign_fut"] == -81000, "寫入的籌碼數值不對：%s" % row)
 check(chips == sorted(chips, key=lambda r: r["date"]), "歷史檔必須維持日期排序")
-evid = os.path.join(update_daily.EVID_DIR, "2026-09-01.txt")
+evid = os.path.join(update_daily.EVID_DIR, NEW.replace("/", "-") + ".txt")
 check(os.path.exists(evid), "取數依據檔沒有產生：%s" % evid)
 
 # 6) 再跑一次同一天 → skipped，內容完全不變
@@ -201,6 +220,26 @@ site = build_site.build(quiet=True)
 check(site["chips"][-1]["date"] == NEW, "site.json 應該含有新的一天")
 check(NEW in [r["date"] for r in site["stocks"][0]["rows"]],
       "site.json 的股價應該含有新的一天")
+
+# 8) config 新增了股票、但還沒補抓它的股價 → build_site 只能警告，不能中止。
+#    workflow 是「先跑測試（會呼叫 build_site）再補抓股價」，
+#    這裡如果中止，那些股價就永遠補不到了（死鎖）。
+cfg_path = os.path.join(proj, "config.json")
+with open(cfg_path, encoding="utf-8") as f:
+    raw = json.load(f)
+raw["stocks"].append({"code": "9999", "name": "測試新股"})
+with open(cfg_path, "w", encoding="utf-8") as f:
+    json.dump(raw, f, ensure_ascii=False)
+try:
+    site2 = build_site.build(quiet=True)
+    newbie = [s for s in site2["stocks"] if s["code"] == "9999"]
+    check(len(newbie) == 1 and newbie[0]["rows"] == [],
+          "新股票應該以空 rows 出現在 site.json，實得 %s" % newbie)
+    check(len(site2["chips"]) > 0, "新增股票不該影響籌碼資料")
+except Exception as e:
+    fails.append("config 新增還沒補股價的股票時 build_site 不該中止，卻丟出 %s：%s"
+                 % (type(e).__name__, e))
+print("  新增股票：還沒補抓股價時 build_site 只警告不中止（不然 workflow 會死鎖）")
 
 shutil.rmtree(work, ignore_errors=True)
 

@@ -395,8 +395,16 @@ for d in diff_days:
 if cmp_opt is None or not any(s.get("type") == "line" and s.get("yAxisIndex") == 0
                               for s in cmp_opt["series"]):
     fails.append("比較模式沒有產生指數化折線")
-elif len([s for s in cmp_opt["series"] if s.get("yAxisIndex") == 0 and s.get("xAxisIndex") == 0]) != 3:
-    fails.append("比較模式的折線不是 3 條")
+else:
+    n_lines = len([s for s in cmp_opt["series"]
+                   if s.get("yAxisIndex") == 0 and s.get("xAxisIndex") == 0])
+    if n_lines != len(prices["stocks"]):
+        fails.append("比較模式的折線 %d 條，應該等於股票數 %d"
+                     % (n_lines, len(prices["stocks"])))
+    colors = [s.get("color") for s in cmp_opt["series"]
+              if s.get("yAxisIndex") == 0 and s.get("xAxisIndex") == 0]
+    if len(set(colors)) != len(colors):
+        fails.append("比較模式有重複的線色：%s" % colors)
 
 for off, thr, opt in toggle_cases:
     fails += check_sub_axes(opt, thr, [k for k in SMALL_KEYS if k not in off],

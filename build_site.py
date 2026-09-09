@@ -113,8 +113,16 @@ def build(quiet=False):
         json.dump(site, f, ensure_ascii=False, separators=(",", ":"))
         f.write(";\n")
 
+    # 剛加進 config 但還沒補抓股價的股票，rows 會是空的。
+    # 這裡不能當成錯誤中止——workflow 是「先跑測試（會呼叫 build_site）再補抓股價」，
+    # 中止的話就永遠補不到那些股價了。所以只警告，讓補抓那一步有機會執行。
     warn = []
     for s in site["stocks"]:
+        if not s["rows"]:
+            warn.append("%s %s 還沒有任何股價——config 剛加入的話，"
+                        "跑 python3 fetch_prices.py --months-back 6 補抓"
+                        % (s["code"], s["name"]))
+            continue
         have = {r["date"] for r in s["rows"]}
         missing = [d for d in chip_dates if d not in have]
         if missing:
@@ -126,9 +134,12 @@ def build(quiet=False):
         span = "%s ~ %s" % (chip_dates[0], chip_dates[-1])
         print("  籌碼 %d 天（%s）" % (len(chips), span))
         for s in site["stocks"]:
-            print("  %s %s：股價 %d 筆（%s ~ %s）" % (
-                s["code"], s["name"], len(s["rows"]),
-                s["rows"][0]["date"], s["rows"][-1]["date"]))
+            if s["rows"]:
+                print("  %s %s：股價 %d 筆（%s ~ %s）" % (
+                    s["code"], s["name"], len(s["rows"]),
+                    s["rows"][0]["date"], s["rows"][-1]["date"]))
+            else:
+                print("  %s %s：股價 0 筆（尚未補抓）" % (s["code"], s["name"]))
         print("  結算日 %d 個：%s" % (len(site["settlements"]),
                                     ", ".join(site["settlements"])))
         print("  已寫出 data/site.json（%.0f KB）與 data/site.js"

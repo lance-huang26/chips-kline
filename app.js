@@ -26,6 +26,7 @@
   var UP = '#d93b30', DOWN = '#12996b';
   var UP_SOFT = 'rgba(217,59,48,0.09)', DOWN_SOFT = 'rgba(18,153,107,0.09)';
   var SCORE_COLOR = '#2a78d6';
+  var COMPARE_COLORS = ['#eb6834', '#1baf7a', '#4a3aa7', '#e87ba4', '#2a78d6'];
 
   // ---------------------------------------------------------------- 狀態
   var S = {
@@ -231,9 +232,15 @@
   function checkAlignment() {
     // 只檢查「有籌碼的那些日子有沒有對應的股價」。
     // 股價會比籌碼多出前面幾個月（均線暖身用），那是正常的，不算對不上。
+    //
+    // 兩種情況要分開看：
+    //   完全沒有股價 → 多半是剛加進 config、還沒補抓，屬於已知的過渡狀態，
+    //                  用淡色提示就好，不要跳紅色錯誤框。
+    //   有股價但缺幾天 → 這才是真的資料不一致，要顯眼。
     var chipDates = S.allChips.map(function (c) { return c.date; });
-    var msgs = [];
+    var msgs = [], pending = [];
     S.prices.stocks.forEach(function (st) {
+      if (!st.rows.length) { pending.push(st.code + ' ' + st.name); return; }
       var pd = {};
       st.rows.forEach(function (r) { pd[r.date] = true; });
       var onlyChip = chipDates.filter(function (d) { return !pd[d]; });
@@ -243,6 +250,14 @@
                   (onlyChip.length > 8 ? ' …共 ' + onlyChip.length + ' 天' : '') + ']');
       }
     });
+
+    var note = el('dataNote');
+    if (note) {
+      note.textContent = pending.length
+        ? '尚未補抓股價：' + pending.join('、') +
+          '（跑 fetch_prices.py --months-back 6，或在 Actions 手動觸發並填 prices_months）'
+        : '';
+    }
     if (msgs.length) {
       var box = el('loadErr');
       box.hidden = false;
@@ -396,7 +411,9 @@
           type: 'line', xAxisIndex: 0, yAxisIndex: 0,
           data: data, showSymbol: false, connectNulls: false,
           lineStyle: { width: 2 },
-          color: ['#2a78d6', '#eb6834', '#4a3aa7'][i % 3],
+          // 五個顏色都驗過色盲可辨（最差相鄰 ΔE 9.2 deutan）；
+          // 藍色刻意排最後，前四檔才不會撞到右軸總分線的藍
+          color: COMPARE_COLORS[i % COMPARE_COLORS.length],
           emphasis: { focus: 'series' }, z: 4
         });
       });
