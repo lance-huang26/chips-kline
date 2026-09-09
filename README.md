@@ -65,13 +65,22 @@ python3 update_daily.py --dry-run              # 只抓不寫
 
 ## GitHub Actions
 
-`.github/workflows/daily.yml` 目前**只開手動觸發**。
+`.github/workflows/daily.yml` **排程已啟用**：週一到週五台北時間 16:00 主跑、
+18:00 補跑（cron 是 UTC 的 `0 8` 與 `0 10`）。排程只抓當天，並帶 `--max-stale-days 5`
+——連續超過 5 天沒有新資料就讓 workflow 失敗，GitHub 會寄信通知。
 
-先到 Actions 頁按一次 Run workflow（`days` 預設 120，等於一次回填約四個月），
-確認 GitHub 的海外 IP 沒有被證交所／期交所擋掉。
-確認可行之後，把 workflow 裡 `schedule:` 那段取消註解即可（16:00 主跑、18:00 補跑，UTC 是 8 點與 10 點）。
+手動觸發（Run workflow）才會用到回填參數，`days` 預設 120（約四個月）。
 
-真的被擋，就改在 Mac 上用 launchd 排程跑同一支 `update_daily.py`，腳本一行都不用改。
+兩件要知道的事：
+
+* GitHub 的排程**不保證準時**，尖峰時段可能延遲數十分鐘，18:00 那次補跑就是為了這個。
+* repo 連續 **60 天沒有任何活動**時，GitHub 會自動停用排程並寄信通知。
+  正常情況下 bot 每天 commit 資料就算活動，所以不會觸發；但如果停了一段時間要留意。
+
+bot 每天會 commit 回 repo，所以你本機有未推的 commit 時 `git push` 會被擋。
+這個 repo 已經設好 `pull.rebase true`，直接 `git pull` 再 push 即可。
+萬一 `data/site.json` 衝突，不要手動合併——它是 `build_site.py` 從
+`data/history/*.csv` 產生的衍生檔，以歷史檔為準重跑一次 build 就好。
 
 ## 檔案
 
