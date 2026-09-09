@@ -67,7 +67,67 @@ def snapshot():
 def run(chip_fn, price_fn=fake_stock_day, **kw):
     taifex.fetch_day = chip_fn
     fetch_prices.fetch_raw = price_fn
+    update_daily._PRICE_CACHE.clear()
     return update_daily.one_day(NEW, cfg, **kw)
+
+
+# ---------------------------------------------------------------- 參數解析
+# workflow 的輸入欄沒填就是空字串。以前 --to 空著會直接把空字串丟給 argparse 而爆掉。
+cd = update_daily.choose_dates
+T = "2026/09/09"                     # 星期三
+check(cd(today=T) == [T], "沒給參數應該就是今天")
+check(cd(date="2026/09/07", today=T) == ["2026/09/07"], "--date 應該只處理那一天")
+check(cd(frm="2026/09/07", to="", today=T) == ["2026/09/07", "2026/09/08", "2026/09/09"],
+      "--to 留空應該等於今天，實得 %s" % cd(frm="2026/09/07", to="", today=T))
+check(cd(frm="2026/09/07", to=None, today=T) == cd(frm="2026/09/07", to="", today=T),
+      "--to 給 None 與給空字串要一致")
+check(cd(days=1, today=T) == [T], "--days 1 應該只有今天")
+check(len(cd(days=60, today=T)) == 43,
+      "--days 60 應該是 43 個工作日，實得 %d" % len(cd(days=60, today=T)))
+check(cd(days=7, today=T)[0] == "2026/09/03" and cd(days=7, today=T)[-1] == T,
+      "--days 7 的區間不對：%s" % cd(days=7, today=T))
+# 週末要被跳掉
+check("2026/09/05" not in cd(days=7, today=T) and "2026/09/06" not in cd(days=7, today=T),
+      "週末不該出現在待處理清單裡")
+# --from 優先於 --days
+check(cd(frm="2026/09/08", days=60, today=T) == ["2026/09/08", "2026/09/09"],
+      "--from 應該優先於 --days")
+try:
+    cd(to="2026/09/08", today=T)
+    fails.append("只給 --to 應該報錯")
+except ValueError:
+    pass
+try:
+    cd(days=0, today=T)
+    fails.append("--days 0 應該報錯")
+except ValueError:
+    pass
+print("  參數解析：--to 留空 = 今天、--days N、--from 優先、只給 --to 會報錯")
+
+
+# ---------------------------------------------------------------- 股價快取
+# STOCK_DAY 一次回一整月，回填時同一個月份不該重複抓
+calls = []
+
+
+def counting(code, month, retries=3):
+    calls.append((code, month))
+    return {"stat": "OK", "title": "t", "data": [
+        ["115/09/%02d" % d, "1", "2", "1.00", "1.00", "1.00", "1.00", "0.00", "1", ""]
+        for d in range(1, 11)]}
+
+
+update_daily._PRICE_CACHE.clear()
+fetch_prices.fetch_raw = counting
+codes = [s["code"] for s in cfg["stocks"]]
+for day in ("2026/09/01", "2026/09/02", "2026/09/03"):
+    got, why = update_daily.prices_for_date(day, codes)
+    check(got is not None, "%s 應該抓得到股價（%s）" % (day, why))
+check(len(calls) == len(codes),
+      "三天只該抓 %d 次（每檔一個月份），實得 %d 次" % (len(codes), len(calls)))
+check(len(set(calls)) == len(calls), "快取失效，同一個 (股票, 月份) 被抓了不只一次")
+print("  股價快取：3 個日期共用 1 次月檔請求／檔（回填 60 天可省下約 120 次請求）")
+update_daily._PRICE_CACHE.clear()
 
 
 # 1) 已存在的日期：不重抓、不改檔

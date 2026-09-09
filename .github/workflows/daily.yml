@@ -6,14 +6,18 @@ name: 每日更新籌碼與股價
 on:
   workflow_dispatch:
     inputs:
+      days:
+        description: "回填最近幾天（60 ≒ 兩個月、120 ≒ 四個月）。留空 = 只抓一天"
+        required: false
+        default: "60"
       date:
-        description: "指定日期 YYYY/MM/DD（留空 = 今天）"
+        description: "只抓某一天 YYYY/MM/DD（留空 = 今天）。填了 days 就會被忽略"
         required: false
       from:
-        description: "回填起日 YYYY/MM/DD（要和 to 一起給）"
+        description: "自訂回填起日 YYYY/MM/DD（優先於 days）"
         required: false
       to:
-        description: "回填迄日 YYYY/MM/DD"
+        description: "自訂回填迄日，留空 = 今天"
         required: false
       force:
         description: "覆寫已存在的日期"
@@ -38,6 +42,7 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -53,20 +58,37 @@ jobs:
 
       - name: 抓取並更新
         id: update
+        # 輸入值走環境變數，不要直接內插進 shell
+        env:
+          IN_DAYS: ${{ inputs.days }}
+          IN_DATE: ${{ inputs.date }}
+          IN_FROM: ${{ inputs.from }}
+          IN_TO: ${{ inputs.to }}
+          IN_FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
         run: |
-          ARGS=""
-          if [ -n "${{ inputs.from }}" ]; then
-            ARGS="--from ${{ inputs.from }} --to ${{ inputs.to }}"
-          elif [ -n "${{ inputs.date }}" ]; then
-            ARGS="--date ${{ inputs.date }}"
+          set -euo pipefail
+          ARGS=()
+          if [ "$EVENT" = "schedule" ]; then
+            # 排程只抓當天，並檢查資料是不是太久沒更新
+            ARGS+=(--max-stale-days 5)
+          elif [ -n "${IN_FROM:-}" ]; then
+            ARGS+=(--from "$IN_FROM")
+            # --to 留空就是今天；絕對不要塞一個空字串進去
+            if [ -n "${IN_TO:-}" ]; then ARGS+=(--to "$IN_TO"); fi
+          elif [ -n "${IN_DAYS:-}" ]; then
+            ARGS+=(--days "$IN_DAYS")
+          elif [ -n "${IN_DATE:-}" ]; then
+            ARGS+=(--date "$IN_DATE")
           fi
-          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
-          # 排程跑的時候才檢查資料是不是太久沒更新
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            ARGS="$ARGS --max-stale-days 5"
+          if [ "${IN_FORCE:-}" = "true" ]; then ARGS+=(--force); fi
+
+          echo "執行：python3 update_daily.py ${ARGS[*]:-（無參數）}"
+          if [ ${#ARGS[@]} -eq 0 ]; then
+            python3 update_daily.py
+          else
+            python3 update_daily.py "${ARGS[@]}"
           fi
-          echo "執行：python3 update_daily.py $ARGS"
-          python3 update_daily.py $ARGS
 
       - name: commit 並 push
         run: |

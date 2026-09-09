@@ -34,7 +34,9 @@ ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟�
 ```bash
 python3 update_daily.py                        # 今天（台北時間）
 python3 update_daily.py --date 2026/09/08      # 指定某天
-python3 update_daily.py --from 2026/06/01 --to 2026/07/31   # 回填歷史
+python3 update_daily.py --days 60              # 回填最近 60 天（≒ 兩個月）
+python3 update_daily.py --from 2026/06/01      # 從某天到今天
+python3 update_daily.py --from 2026/06/01 --to 2026/07/31
 python3 update_daily.py --dry-run              # 只抓不寫
 ```
 
@@ -65,7 +67,8 @@ python3 update_daily.py --dry-run              # 只抓不寫
 
 `.github/workflows/daily.yml` 目前**只開手動觸發**。
 
-先到 Actions 頁按一次 Run workflow，確認 GitHub 的海外 IP 沒有被證交所／期交所擋掉。
+先到 Actions 頁按一次 Run workflow（`days` 預設 60，等於一次回填約兩個月），
+確認 GitHub 的海外 IP 沒有被證交所／期交所擋掉。
 確認可行之後，把 workflow 裡 `schedule:` 那段取消註解即可（16:00 主跑、18:00 補跑，UTC 是 8 點與 10 點）。
 
 真的被擋，就改在 Mac 上用 launchd 排程跑同一支 `update_daily.py`，腳本一行都不用改。

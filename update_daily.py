@@ -54,18 +54,56 @@ def daterange(a, b):
     return out
 
 
+# STOCK_DAY 一次回傳一整個月，所以同一個月份只要抓一次。
+# 回填兩個月（約 43 個工作日）時，這個快取讓股價請求從 129 次降到 6 次。
+_PRICE_CACHE = {}
+
+
+def stock_day(code, month, use_cache=False):
+    key = (code, month)
+    if key in _PRICE_CACHE:
+        return _PRICE_CACHE[key]
+    if use_cache:
+        payload = fetch_prices.load_cached(code, month)
+    else:
+        payload = fetch_prices.fetch_raw(code, month)
+        os.makedirs(fetch_prices.RAW_DIR, exist_ok=True)
+        with open(fetch_prices.raw_path(code, month), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    _PRICE_CACHE[key] = payload
+    return payload
+
+
+def choose_dates(date=None, frm=None, to=None, days=None, today=None):
+    """決定這次要處理哪些日期。優先順序：--from > --days > --date > 今天。
+
+    --to 留空就是今天（空字串也算留空——workflow 的輸入欄沒填就是空字串，
+    以前這裡會把空字串直接傳給 argparse 而爆掉）。
+    """
+    today = today or today_tpe()
+    frm = (frm or "").strip() or None
+    to = (to or "").strip() or None
+    date = (date or "").strip() or None
+
+    if frm:
+        return daterange(frm, to or today)
+    if to:
+        raise ValueError("只給 --to 沒有 --from；要回填請給 --from，或改用 --days N")
+    if days is not None:
+        if days < 1:
+            raise ValueError("--days 要是正整數，收到 %r" % days)
+        end = dt.date(int(today[:4]), int(today[5:7]), int(today[8:10]))
+        start = end - dt.timedelta(days=days - 1)
+        return daterange(start.strftime("%Y/%m/%d"), end.strftime("%Y/%m/%d"))
+    return [date or today]
+
+
 def prices_for_date(date, codes, use_cache=False):
     """回傳 {code: row}；任何一檔缺當天資料就回 None（代表尚未公布）。"""
     month = date[:4] + date[5:7]
     got = {}
     for code in codes:
-        if use_cache:
-            payload = fetch_prices.load_cached(code, month)
-        else:
-            payload = fetch_prices.fetch_raw(code, month)
-            os.makedirs(fetch_prices.RAW_DIR, exist_ok=True)
-            with open(fetch_prices.raw_path(code, month), "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
+        payload = stock_day(code, month, use_cache)
         rows = {r["date"]: r for r in fetch_prices.parse(payload, code)}
         if date not in rows:
             return None, "%s 還沒有 %s 的收盤資料" % (code, date)
@@ -127,8 +165,10 @@ def _fmt(chip, prices):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date")
-    ap.add_argument("--from", dest="frm")
-    ap.add_argument("--to")
+    ap.add_argument("--from", dest="frm", help="回填起日 YYYY/MM/DD")
+    ap.add_argument("--to", help="回填迄日，留空 = 今天")
+    ap.add_argument("--days", type=int,
+                    help="回填最近 N 個日曆日（60 ≒ 兩個月、120 ≒ 四個月）")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--use-cache", action="store_true",
@@ -139,14 +179,19 @@ def main():
 
     cfg = build_site.load_config()
 
-    if args.frm or args.to:
-        if not (args.frm and args.to):
-            ap.error("--from 與 --to 要一起給")
-        dates = daterange(args.frm, args.to)
-    else:
-        dates = [args.date or today_tpe()]
+    try:
+        dates = choose_dates(args.date, args.frm, args.to, args.days)
+    except ValueError as e:
+        ap.error(str(e))
 
-    written = 0
+    if not dates:
+        print("指定的區間裡沒有任何工作日，沒事可做。")
+        return
+
+    if len(dates) > 1:
+        print("要處理 %d 個工作日：%s ~ %s\n" % (len(dates), dates[0], dates[-1]))
+
+    written = pending = skipped = 0
     for d in dates:
         try:
             status, msg = one_day(d, cfg, args.force, args.dry_run, args.use_cache)
@@ -158,6 +203,14 @@ def main():
         print("%s %s  %s" % (icon, d, msg))
         if status == "written":
             written += 1
+        elif status == "skipped":
+            skipped += 1
+        else:
+            pending += 1
+
+    if len(dates) > 1:
+        print("\n共 %d 天：新增 %d、已存在略過 %d、無資料 %d"
+              % (len(dates), written, skipped, pending))
 
     if written and not args.dry_run:
         print("\n重建 site.json：")
