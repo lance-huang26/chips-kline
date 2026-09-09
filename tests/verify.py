@@ -178,8 +178,9 @@ with sync_playwright() as pw:
             }""", n)
         pg.wait_for_timeout(150)
         t = read_table()
-        win_cases[n] = {"rows": len(t), "first_date": t[0][0].split()[0],
-                        "first_delta": t[0][6], "last_date": t[-1][0].split()[0]}
+        # 表格由新到舊：t[0] 是最新，t[-1] 是視窗起點
+        win_cases[n] = {"rows": len(t), "first_date": t[-1][0].split()[0],
+                        "first_delta": t[-1][6], "last_date": t[0][0].split()[0]}
     pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
     pg.wait_for_timeout(150)
@@ -254,6 +255,13 @@ price_by_date = {r["date"]: r for r in prices["stocks"][0]["rows"]}
 
 for thr in (-83000, -80000):
     tbl = results[thr]
+    shown = [r[0].split()[0] for r in tbl]
+    if shown != sorted(shown, reverse=True):
+        fails.append("thr=%s 逐日明細不是由新到舊排序：開頭 %s" % (thr, shown[:3]))
+    if shown and shown[0] != chips[-1]["date"]:
+        fails.append("thr=%s 表格第一列應該是最新的 %s，實得 %s"
+                     % (thr, chips[-1]["date"], shown[0]))
+    tbl = tbl[::-1]          # 之後的逐格比對沿用「由舊到新」的索引
     if len(tbl) != len(chips):
         fails.append("thr=%s 表格列數 %d != %d" % (thr, len(tbl), len(chips)))
         continue

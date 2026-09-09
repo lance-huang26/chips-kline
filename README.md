@@ -34,7 +34,7 @@ ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟�
 ```bash
 python3 update_daily.py                        # 今天（台北時間）
 python3 update_daily.py --date 2026/09/08      # 指定某天
-python3 update_daily.py --days 60              # 回填最近 60 天（≒ 兩個月）
+python3 update_daily.py --days 120             # 回填最近 120 天（≒ 四個月）
 python3 update_daily.py --from 2026/06/01      # 從某天到今天
 python3 update_daily.py --from 2026/06/01 --to 2026/07/31
 python3 update_daily.py --dry-run              # 只抓不寫
@@ -67,7 +67,7 @@ python3 update_daily.py --dry-run              # 只抓不寫
 
 `.github/workflows/daily.yml` 目前**只開手動觸發**。
 
-先到 Actions 頁按一次 Run workflow（`days` 預設 60，等於一次回填約兩個月），
+先到 Actions 頁按一次 Run workflow（`days` 預設 120，等於一次回填約四個月），
 確認 GitHub 的海外 IP 沒有被證交所／期交所擋掉。
 確認可行之後，把 workflow 裡 `schedule:` 那段取消註解即可（16:00 主跑、18:00 補跑，UTC 是 8 點與 10 點）。
 
@@ -133,6 +133,9 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 
 **乖離率**＝`(收盤 − MA20) / MA20 × 100%`，三檔都算，hover 一次列出。
 正乖離 > 15% 標紅。均線只用有交易的日子算，暖身不足時顯示 `—`。
+
+**逐日明細表格由新到舊**（最新的在最上面），但圖表維持時間軸方向（左舊右新）——
+兩者刻意不一致：表格是拿來查最近幾天的，圖表是看趨勢的。
 
 ## 改設定
 

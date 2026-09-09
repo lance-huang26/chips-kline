@@ -681,8 +681,12 @@
     h2 += '</tr>';
     thead.innerHTML = h1 + h2;
 
+    // 表格由新到舊（最新的在最上面），但圖表維持時間軸方向（左舊右新）。
+    // i 一律是「由舊到新」的索引，dayDelta 與計分都靠它，所以只反轉輸出順序。
     var body = '';
-    S.dates.forEach(function (d, i) {
+    var order = S.dates.map(function (_, i) { return i; }).reverse();
+    order.forEach(function (i) {
+      var d = S.dates[i];
       var c = S.chips[i], s = sc[i], r = rows[i];
       var chg = r && r.change !== null && r.change !== undefined ? r.change : null;
       var prev = (r && chg !== null) ? r.close - chg : null;

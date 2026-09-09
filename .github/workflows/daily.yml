@@ -9,7 +9,7 @@ on:
       days:
         description: "回填最近幾天（60 ≒ 兩個月、120 ≒ 四個月）。留空 = 只抓一天"
         required: false
-        default: "60"
+        default: "120"
       date:
         description: "只抓某一天 YYYY/MM/DD（留空 = 今天）。填了 days 就會被忽略"
         required: false

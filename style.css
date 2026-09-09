@@ -110,6 +110,7 @@ button.preset.on{background:#e8f0fb;border-color:#2a78d6;color:#1b5fae;font-weig
 
 /* ---------- 表格 ---------- */
 .table-wrap h2{font-size:15px;margin:0 0 9px}
+.table-wrap h2 .h2-note{font-size:11.5px;font-weight:400;color:var(--text-muted);margin-left:7px}
 .table-scroll{
   overflow-x:auto;background:var(--surface-1);
   border:1px solid var(--border);border-radius:8px;
