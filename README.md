@@ -23,7 +23,22 @@ ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟�
 | `foreign_opt` | 三大法人-區分各選擇權契約 | 臺指選擇權 外資：買權未平倉淨額 − 賣權未平倉淨額 |
 | `dealer_opt` | 同上 | 同上，自營商 |
 
-股價來自證交所 `STOCK_DAY`（一次回一整月）。
+股價有兩個來源，由 `config.json` 每檔標的的 `source` 決定：
+
+* `twse`（預設）＝ 證交所 `STOCK_DAY`，一次回一整月。
+* `taifex` ＝ 期交所「期貨每日交易行情」`futDataDown`，用於**台指期近月**。
+
+台指期近月的挑法：契約 `TX`、交易時段**一般**（8:45–13:45，和現貨盤對得起來）、
+到期月份是純 6 位數（排除 `202609/202610` 這種價差列——那些列的價格是兩個月份的
+價差，兩三位數，誤抓的話 K 線會變成一堆 100~500 的數字），同一天取**最小的到期月份**。
+
+換月是自動的：結算日當天舊月份還在（2026/08/19 仍看得到 202608），隔天就消失，
+最小月份自然變成下一個月，不需要寫死結算日。
+
+**代價：換月當天序列會跳空。** 2026/08/19 收 44,612（202608）→ 08/20 收 44,868（202609），
+但 202609 自己是從 44,528 漲到 44,868——連續近月序列在那天多了約 84 點的人工落差。
+所有「近月連續」都有這個性質，本專案不做還原、只如實記錄；
+MA20 與乖離率會吸收到這個跳空，判讀時要有數。
 
 口徑說明：`foreign_fut` 是純大台（TX）；`top10_*` 是 `TX+MTX/4+TMF/20` 合併口徑
 ——期交所在 `TX` 這個代碼底下公布的就已經是合併值（CSV 的商品名稱欄直接寫著），
@@ -86,7 +101,8 @@ bot 每天會 commit 回 repo，所以你本機有未推的 commit 時 `git push
 ```
 index.html / app.js / style.css   前端（只讀 data/site.json）
 config.json                       股票清單、均線天數、門檻預設、區間選項
-taifex.py                         期交所抓取與解析
+taifex.py                         期交所籌碼抓取與解析（五欄）
+taifut.py                         台指期近月日 K 抓取與解析
 fetch_prices.py                   證交所股價抓取
 store.py                          append-only 歷史檔讀寫（原子寫入、冪等）
 build_site.py                     歷史檔 → data/site.json（結算日自動推算）
@@ -107,7 +123,8 @@ MA20 也自然有暖身資料，不必額外維護一份 warmup。
 ## 測試
 
 ```bash
-python3 tests/test_taifex.py        # 期交所解析器（fixture 是 07/13、08/19、08/31 的真實回應）
+python3 tests/test_taifex.py        # 期交所籌碼解析器（fixture 是 07/13、08/19、08/31 的真實回應）
+python3 tests/test_taifut.py        # 台指期近月（fixture 跨 8 月結算日，涵蓋換月）
 python3 tests/test_update_daily.py  # 每日流程的行為（冪等、五欄同進退、失敗不寫檔）
 python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際頁面逐格比對
 ```
@@ -151,11 +168,12 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 區間選項、`settlementOverrides`（結算日預設取每月第三個星期三，放假順延到下一個交易日）。
 改完跑 `python3 build_site.py`。
 
-### 新增股票
+### 新增標的
 
-籌碼那五欄是大盤層級的，和個股無關，所以加股票只影響 K 線那一半。
+籌碼那五欄是大盤層級的，和個股無關，所以加標的只影響 K 線那一半。
 
-1. 把股票加進 `config.json` 的 `stocks`。
+1. 把標的加進 `config.json` 的 `stocks`。證交所個股不用寫 `source`；
+   期交所的標的要寫 `{"code":"TX","name":"台指期近月","source":"taifex"}`。
 2. **補抓它的歷史股價**——這步不能省。`update_daily.py` 對「已經有籌碼」的日子
    會整天略過，所以新股票的歷史股價不會自己被補上：
 

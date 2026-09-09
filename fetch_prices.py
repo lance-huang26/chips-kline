@@ -27,7 +27,8 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import store  # noqa: E402
+import store   # noqa: E402
+import taifut  # noqa: E402
 
 API = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
 UA = "Mozilla/5.0 (compatible; chips-kline/1.0)"
@@ -43,8 +44,48 @@ def load_config():
         return json.load(f)
 
 
-def raw_path(stock_no, month):
-    return os.path.join(RAW_DIR, "STOCK_DAY_%s_%s.json" % (stock_no, month))
+def source_of(code, cfg=None):
+    """每檔標的的資料來源：twse（證交所個股）或 taifex（台指期近月）。"""
+    cfg = cfg or load_config()
+    for s in cfg["stocks"]:
+        if s["code"] == code:
+            return s.get("source", "twse")
+    return "twse"
+
+
+def raw_path(code, month, source="twse"):
+    if source == "taifex":
+        return os.path.join(RAW_DIR, "TAIFUT_%s_%s.csv" % (code, month))
+    return os.path.join(RAW_DIR, "STOCK_DAY_%s_%s.json" % (code, month))
+
+
+def month_payload(code, month, source="twse", use_cache=False):
+    """抓（或讀快取）某檔標的某個月的原始回應。兩種來源共用的入口。"""
+    p = raw_path(code, month, source)
+    if use_cache:
+        if not os.path.exists(p):
+            raise FetchError("找不到快取檔 %s" % p)
+        with open(p, encoding="utf-8") as f:
+            return f.read() if source == "taifex" else json.load(f)
+
+    try:
+        payload = taifut.fetch_month(month) if source == "taifex" else fetch_raw(code, month)
+    except taifut.TaifutError as e:
+        raise FetchError(str(e))
+    os.makedirs(RAW_DIR, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        if source == "taifex":
+            f.write(payload)
+        else:
+            json.dump(payload, f, ensure_ascii=False)
+    return payload
+
+
+def parse_month(payload, code, source="twse"):
+    try:
+        return taifut.parse(payload, code) if source == "taifex" else parse(payload, code)
+    except taifut.TaifutError as e:
+        raise FetchError(str(e))
 
 
 def fetch_raw(stock_no, month, retries=3):
@@ -120,22 +161,18 @@ def months_ending(month, back):
 
 def run(months, codes, use_cache=False, force=False, quiet=False):
     os.makedirs(RAW_DIR, exist_ok=True)
+    cfg = load_config()
     rows, errors = [], []
     for month in months:
         for i, code in enumerate(codes):
+            source = source_of(code, cfg)
             try:
-                if use_cache:
-                    payload = load_cached(code, month)
-                    src = "快取"
-                else:
-                    payload = fetch_raw(code, month)
-                    with open(raw_path(code, month), "w", encoding="utf-8") as f:
-                        json.dump(payload, f, ensure_ascii=False)
-                    src = "API"
+                payload = month_payload(code, month, source, use_cache)
+                src = "快取" if use_cache else ("期交所" if source == "taifex" else "證交所")
             except FetchError as e:
                 errors.append(str(e))
                 continue
-            got = parse(payload, code)
+            got = parse_month(payload, code, source)
             rows.extend(got)
             if not quiet:
                 print("  %s %s：%d 筆（%s）" % (code, month, len(got), src))

@@ -37,6 +37,7 @@ for m in ("store", "taifex", "fetch_prices", "build_site", "update_daily"):
 import store          # noqa: E402
 import taifex         # noqa: E402
 import fetch_prices   # noqa: E402
+import taifut         # noqa: E402
 import update_daily   # noqa: E402
 
 check(os.path.dirname(os.path.abspath(store.__file__)) == proj,
@@ -63,6 +64,26 @@ CHIP = {"date": NEW, "foreign_fut": -81000, "top10_trader": 500,
         "_detail": {}}
 
 
+# 台指期走另一條路（期交所 CSV），測試也要蓋到，否則會真的連網
+_TX_HEAD = ("交易日期,契約,到期月份(週別),開盤價,最高價,最低價,"
+            "收盤價,漲跌價,漲跌%,成交量,交易時段")
+
+
+def fake_tx_month(month, retries=3):
+    y, m = int(month[:4]), int(month[4:])
+    import calendar as _cal
+    rows = [_TX_HEAD]
+    for day in range(1, _cal.monthrange(y, m)[1] + 1):
+        d = "%04d/%02d/%02d" % (y, m, day)
+        rows.append("%s,TX,%s,47000,47500,46800,47100,50,0.11%%,50000,一般" % (d, month))
+        rows.append("%s,TX,%s,47050,47600,46900,47200,60,0.13%%,20000,盤後" % (d, month))
+    return "\n".join(rows) + "\n"
+
+
+def fake_tx_empty(month, retries=3):
+    return _TX_HEAD + "\n"          # 該月份還沒有資料
+
+
 def fake_stock_day(code, month, retries=3):
     return {"stat": "OK", "title": "%s 測試" % code,
             "data": [[NEW_ROC, "1,000", "2,000", "100.00", "110.00",
@@ -74,9 +95,10 @@ def snapshot():
             open(store.PRICES_CSV, encoding="utf-8").read())
 
 
-def run(chip_fn, price_fn=fake_stock_day, **kw):
+def run(chip_fn, price_fn=fake_stock_day, tx_fn=fake_tx_month, **kw):
     taifex.fetch_day = chip_fn
     fetch_prices.fetch_raw = price_fn
+    taifut.fetch_month = tx_fn
     update_daily._PRICE_CACHE.clear()
     return update_daily.one_day(NEW, cfg, **kw)
 
@@ -132,19 +154,34 @@ def counting(code, month, retries=3):
         for x in _cache_days]}
 
 
+tx_calls = []
+
+
+def counting_tx(month, retries=3):
+    tx_calls.append(month)
+    return fake_tx_month(month)
+
+
 update_daily._PRICE_CACHE.clear()
 fetch_prices.fetch_raw = counting
+taifut.fetch_month = counting_tx
 codes = [s["code"] for s in cfg["stocks"]]
+twse_codes = [c for c in codes if fetch_prices.source_of(c, cfg) == "twse"]
+tx_codes = [c for c in codes if fetch_prices.source_of(c, cfg) == "taifex"]
 for day in _cache_dates:
     got, why = update_daily.prices_for_date(day, codes)
     check(got is not None, "%s 應該抓得到股價（%s）" % (day, why))
 _months = {d[:4] + d[5:7] for d in _cache_dates}
-check(len(calls) == len(codes) * len(_months),
-      "%d 天只該抓 %d 次（每檔每個月份一次），實得 %d 次"
-      % (len(_cache_dates), len(codes) * len(_months), len(calls)))
+check(len(calls) == len(twse_codes) * len(_months),
+      "證交所：%d 天只該抓 %d 次（每檔每個月份一次），實得 %d 次"
+      % (len(_cache_dates), len(twse_codes) * len(_months), len(calls)))
+check(len(tx_calls) == len(tx_codes) * len(_months),
+      "期交所：%d 天只該抓 %d 次，實得 %d 次"
+      % (len(_cache_dates), len(tx_codes) * len(_months), len(tx_calls)))
 check(len(set(calls)) == len(calls), "快取失效，同一個 (股票, 月份) 被抓了不只一次")
-print("  股價快取：%d 個日期共用 %d 次月檔請求（回填 120 天可省下數百次請求）"
-      % (len(_cache_dates), len(calls)))
+check(len(set(tx_calls)) == len(tx_calls), "台指期的月檔快取失效")
+print("  股價快取：%d 個日期共用 %d 次證交所 + %d 次期交所月檔請求"
+      % (len(_cache_dates), len(calls), len(tx_calls)))
 update_daily._PRICE_CACHE.clear()
 
 
@@ -156,6 +193,7 @@ def boom(*a, **k):
 before = snapshot()
 taifex.fetch_day = boom
 fetch_prices.fetch_raw = boom
+taifut.fetch_month = boom
 old_status = update_daily.one_day(_last, cfg)   # 歷史最後一天，一定已存在
 check(old_status[0] == "skipped",
       "已存在的日期 %s 應該 skipped，實得 %s" % (_last, old_status))
@@ -176,8 +214,18 @@ def no_price(code, month, retries=3):
     return {"stat": "OK", "title": "t", "data": []}
 
 
-status, msg = run(lambda date, **k: dict(CHIP), no_price)
+status, msg = run(lambda date, **k: dict(CHIP), no_price, fake_tx_empty)
 check(status == "pending", "股價未公布應該是 pending，實得 %r" % status)
+
+# 3b) 只有台指期還沒公布（個股都有了）→ 也要是 pending，不是失敗。
+#     期交所的期貨行情如果那天還沒出來，整個 workflow 不該紅。
+try:
+    status, msg = run(lambda date, **k: dict(CHIP), fake_stock_day, fake_tx_empty)
+    check(status == "pending",
+          "只有台指期未公布時應該是 pending，實得 %r（%s）" % (status, msg))
+except Exception as e:
+    fails.append("只有台指期未公布時不該丟例外，卻丟出 %s：%s" % (type(e).__name__, e))
+check(snapshot() == before, "台指期缺的時候其他標的也不可以先寫入")
 check(snapshot() == before, "股價缺的時候籌碼不可以先寫入——這是半套資料")
 
 # 4) 解析失敗 → 例外，歷史檔不動

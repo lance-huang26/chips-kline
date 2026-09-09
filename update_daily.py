@@ -63,15 +63,10 @@ def stock_day(code, month, use_cache=False):
     key = (code, month)
     if key in _PRICE_CACHE:
         return _PRICE_CACHE[key]
-    if use_cache:
-        payload = fetch_prices.load_cached(code, month)
-    else:
-        payload = fetch_prices.fetch_raw(code, month)
-        os.makedirs(fetch_prices.RAW_DIR, exist_ok=True)
-        with open(fetch_prices.raw_path(code, month), "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-    _PRICE_CACHE[key] = payload
-    return payload
+    source = fetch_prices.source_of(code)
+    payload = fetch_prices.month_payload(code, month, source, use_cache)
+    _PRICE_CACHE[key] = (payload, source)
+    return _PRICE_CACHE[key]
 
 
 def choose_dates(date=None, frm=None, to=None, days=None, today=None):
@@ -103,8 +98,8 @@ def prices_for_date(date, codes, use_cache=False):
     month = date[:4] + date[5:7]
     got = {}
     for code in codes:
-        payload = stock_day(code, month, use_cache)
-        rows = {r["date"]: r for r in fetch_prices.parse(payload, code)}
+        payload, source = stock_day(code, month, use_cache)
+        rows = {r["date"]: r for r in fetch_prices.parse_month(payload, code, source)}
         if date not in rows:
             return None, "%s 還沒有 %s 的收盤資料" % (code, date)
         got[code] = rows[date]

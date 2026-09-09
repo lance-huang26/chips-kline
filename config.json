@@ -19,6 +19,11 @@
     {
       "code": "6770",
       "name": "力積電"
+    },
+    {
+      "code": "TX",
+      "name": "台指期近月",
+      "source": "taifex"
     }
   ],
   "maPeriod": 20,

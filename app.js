@@ -26,7 +26,7 @@
   var UP = '#d93b30', DOWN = '#12996b';
   var UP_SOFT = 'rgba(217,59,48,0.09)', DOWN_SOFT = 'rgba(18,153,107,0.09)';
   var SCORE_COLOR = '#2a78d6';
-  var COMPARE_COLORS = ['#eb6834', '#1baf7a', '#4a3aa7', '#e87ba4', '#2a78d6'];
+  var COMPARE_COLORS = ['#eb6834', '#1baf7a', '#eda100', '#4a3aa7', '#e87ba4', '#2a78d6'];
 
   // ---------------------------------------------------------------- 狀態
   var S = {
