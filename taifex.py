@@ -115,10 +115,15 @@ def page_data_date(html: str):
 def parse_fut(rows: list, date: str) -> int:
     """臺股期貨 → 外資 → 未平倉多空淨額（口數）。
 
-    資料列的形狀有兩種（序號與商品名稱有 rowspan）：
-        15 欄：[序號, 商品名稱, 身份別, ...12 個數字]
-        13 欄：[身份別, ...12 個數字]
+    資料列的形狀有三種（序號與商品名稱有 rowspan）：
+        15 欄：[序號, 商品名稱, 身份別, ...12 個數字]   每個商品區塊的第一列
+        14 欄：[區塊名稱, 身份別, ...12 個數字]         表格最後的「期貨小計」區塊沒有序號
+        13 欄：[身份別, ...12 個數字]                   同區塊的後續列
     所以身份別固定是倒數第 13 欄，未平倉淨額口數固定是倒數第 2 欄。
+
+    「期貨小計」是所有期貨契約的加總，會被當成一個名為「期貨小計」的商品而排除掉。
+    這件事很重要：那一列的外資淨額是六位數，誤抓的話數字看起來仍然「像回事」，
+    但整個判讀都會錯。
     """
     data = [r for r in rows if len(r) >= 13 and r[-13] in IDENTITIES]
     if not data:
@@ -129,6 +134,8 @@ def parse_fut(rows: list, date: str) -> int:
         extra = cells[:-13]
         if len(extra) == 2:            # 序號 + 商品名稱
             commodity = extra[1]
+        elif len(extra) == 1:          # 沒有序號的區塊，例如「期貨小計」
+            commodity = extra[0]
         elif len(extra) != 0:
             raise TaifexError("期貨表格欄數不認得（前綴 %r），期交所可能改版了" % (extra,))
         if commodity == FUT_COMMODITY and cells[-13] == "外資":
@@ -148,8 +155,10 @@ def parse_opt(rows: list, date: str) -> dict:
 
     資料列形狀（序號、商品名稱、權別都可能有 rowspan）：
         16 欄：[序號, 商品名稱, 權別, 身份別, ...12]
-        14 欄：[權別, 身份別, ...12]
+        14 欄：[權別, 身份別, ...12]                    同商品的另一個權別
         13 欄：[身份別, ...12]
+    長度 1 的前綴若不是「買權／賣權」，就當成沒有序號的區塊名稱處理
+    （期貨表格的「期貨小計」就是這種形狀，選擇權表目前沒有，但先擋著）。
     """
     data = [r for r in rows if len(r) >= 13 and r[-13] in IDENTITIES]
     if not data:
@@ -161,8 +170,15 @@ def parse_opt(rows: list, date: str) -> dict:
         extra = cells[:-13]
         if len(extra) == 3:            # 序號 + 商品名稱 + 權別
             commodity, side = extra[1], extra[2]
-        elif len(extra) == 1:          # 只有權別
-            side = extra[0]
+        elif len(extra) == 2:          # 商品名稱 + 權別（沒有序號）
+            if extra[1] not in SIDES:
+                raise TaifexError("選擇權表格前綴不認得 %r，期交所可能改版了" % (extra,))
+            commodity, side = extra[0], extra[1]
+        elif len(extra) == 1:
+            if extra[0] in SIDES:
+                side = extra[0]        # 同商品的另一個權別
+            else:
+                commodity, side = extra[0], None   # 小計之類的區塊
         elif len(extra) != 0:
             raise TaifexError("選擇權表格欄數不認得（前綴 %r），期交所可能改版了" % (extra,))
 
