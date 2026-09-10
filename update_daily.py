@@ -94,25 +94,45 @@ def choose_dates(date=None, frm=None, to=None, days=None, today=None):
 
 
 def prices_for_date(date, codes, use_cache=False):
-    """回傳 {code: row}；任何一檔缺當天資料就回 None（代表尚未公布）。"""
+    """回傳 (已取得的 {code: row}, 當天沒有資料的 code 清單)。"""
     month = date[:4] + date[5:7]
-    got = {}
+    got, missing = {}, []
     for code in codes:
         payload, source = stock_day(code, month, use_cache)
         rows = {r["date"]: r for r in fetch_prices.parse_month(payload, code, source)}
-        if date not in rows:
-            return None, "%s 還沒有 %s 的收盤資料" % (code, date)
-        got[code] = rows[date]
-    return got, None
+        if date in rows:
+            got[code] = rows[date]
+        else:
+            missing.append(code)
+    return got, missing
 
 
 def one_day(date, cfg, force=False, dry_run=False, use_cache=False):
-    """回傳 ('written' | 'skipped' | 'pending', 說明)。失敗會丟例外。"""
+    """回傳 ('written' | 'filled' | 'skipped' | 'pending', 說明)。失敗會丟例外。"""
     codes = [s["code"] for s in cfg["stocks"]]
 
     existing = {r["date"] for r in store.read_chips()}
+    have_price = {(r["date"], r["code"]) for r in store.read_prices()}
+    lack = [c for c in codes if (date, c) not in have_price]
+
+    # 這天的籌碼已經有了。以前這裡就直接 skipped，但那樣有個洞：
+    # 新加的標的在「已經有籌碼」的那些日子永遠補不到股價，歷史就斷在加標的的那天。
+    # 所以現在還要看標的完整性——缺誰就補誰，其他都不動。
     if date in existing and not force:
-        return "skipped", "已經有 %s 的籌碼資料（要重抓請加 --force）" % date
+        if not lack:
+            return "skipped", "已經有 %s 的資料（要重抓請加 --force）" % date
+
+        got, still = prices_for_date(date, lack, use_cache=use_cache)
+        if not got:
+            return "skipped", ("已有籌碼；%s 當天沒有股價資料（可能尚未上市或停牌），略過"
+                               % "、".join(still))
+        if dry_run:
+            return "filled", "（dry-run）補 %s 的股價" % "、".join(sorted(got))
+        store.upsert_prices(list(got.values()))
+        note = "補上 %s 的股價" % "、".join(sorted(got))
+        if still:
+            note += "（%s 當天沒有資料）" % "、".join(still)
+        return "filled", note
 
     # --- 抓籌碼（五欄同進退，任何一欄拿不到就整天不寫）---
     try:
@@ -120,10 +140,10 @@ def one_day(date, cfg, force=False, dry_run=False, use_cache=False):
     except taifex.NoDataForDate as e:
         return "pending", str(e)
 
-    # --- 抓股價 ---
-    prices, why = prices_for_date(date, codes, use_cache=use_cache)
-    if prices is None:
-        return "pending", why
+    # --- 抓股價（新的一天：所有標的同進退，缺一個就整天不寫）---
+    prices, lack_now = prices_for_date(date, codes, use_cache=use_cache)
+    if lack_now:
+        return "pending", "%s 還沒有 %s 的收盤資料" % ("、".join(lack_now), date)
 
     # --- 驗證閘門 ---
     missing = [f for f in taifex.CHIP_FIELDS if chip.get(f) is None]
@@ -194,9 +214,9 @@ def main():
             print("\n[失敗] %s：%s" % (d, e), file=sys.stderr)
             print("       歷史檔沒有被修改。", file=sys.stderr)
             sys.exit(1)
-        icon = {"written": "＋", "skipped": "・", "pending": "…"}[status]
+        icon = {"written": "＋", "filled": "⊕", "skipped": "・", "pending": "…"}[status]
         print("%s %s  %s" % (icon, d, msg))
-        if status == "written":
+        if status in ("written", "filled"):
             written += 1
         elif status == "skipped":
             skipped += 1
@@ -204,7 +224,7 @@ def main():
             pending += 1
 
     if len(dates) > 1:
-        print("\n共 %d 天：新增 %d、已存在略過 %d、無資料 %d"
+        print("\n共 %d 天：寫入/補齊 %d、已完整略過 %d、無資料 %d"
               % (len(dates), written, skipped, pending))
 
     if written and not args.dry_run:

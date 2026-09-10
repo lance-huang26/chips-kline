@@ -68,6 +68,12 @@ python3 update_daily.py --dry-run              # 只抓不寫
 
 **冪等。** 已存在的日期預設跳過（`--force` 才覆寫），補跑 / 手動觸發 / 兩個排程重疊都安全。
 
+**跳過的條件是「完整」，不只是「有籌碼」。** 一開始只看「這天有沒有籌碼」就決定跳過，
+結果新加的標的在所有既有籌碼日永遠補不到股價——2026/09 加台光電、力積電、台指期時
+就這樣斷在 07/09（那之前的日子還沒有籌碼所以整天重跑，之後的日子被跳過）。
+現在還會檢查每個標的當天有沒有股價，缺誰補誰、不重抓籌碼、也不動其他標的。
+所以**加新標的之後跑一次 `--days N` 就會自己補齊**。
+
 **解析不到就報錯，不回 0。** 期交所是 HTML 表格，改版遲早會壞。找不到
 「臺股期貨 → 外資」那一列時流程直接失敗——默默寫個 0 進歷史檔，那種錯誤要幾個月後才會發現。
 
@@ -174,14 +180,19 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 
 1. 把標的加進 `config.json` 的 `stocks`。證交所個股不用寫 `source`；
    期交所的標的要寫 `{"code":"TX","name":"台指期近月","source":"taifex"}`。
-2. **補抓它的歷史股價**——這步不能省。`update_daily.py` 對「已經有籌碼」的日子
-   會整天略過，所以新股票的歷史股價不會自己被補上：
+2. **補抓它的歷史股價。** 兩種方式都可以：
 
    ```bash
-   python3 fetch_prices.py --months-back 6 && python3 build_site.py
+   python3 update_daily.py --days 120      # 會自動偵測缺漏並補齊（推薦）
    ```
 
-   或在 GitHub Actions 上手動觸發，把 `prices_months` 填 6。
+   ```bash
+   python3 fetch_prices.py --months-back 6 && python3 build_site.py   # 依月份整批抓，較快
+   ```
+
+   在 GitHub Actions 上，前者是 `days` 填 120，後者是 `prices_months` 填 6。
+   前者比較慢（逐日檢查）但保證和籌碼日對齊；後者快但抓的是整月，
+   可能多抓一些籌碼還沒涵蓋的日子（無害）。
 
 補抓之前 `build_site.py` 會警告該股票「股價 0 筆」但**不會中止**——
 因為 workflow 是先跑測試（會呼叫 build_site）再補抓股價，中止的話就永遠補不到了。

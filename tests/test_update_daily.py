@@ -194,9 +194,14 @@ before = snapshot()
 taifex.fetch_day = boom
 fetch_prices.fetch_raw = boom
 taifut.fetch_month = boom
-old_status = update_daily.one_day(_last, cfg)   # 歷史最後一天，一定已存在
+# 「完整的一天」= 籌碼有了、而且每個標的都有股價。只有這種日子才該完全不連外。
+# （某個標的缺股價的日子會走補齊路徑，那是 7b 測的。）
+_complete_codes = {r["code"] for r in store.read_prices() if r["date"] == _last}
+_cfg_last = {"stocks": [x for x in cfg["stocks"] if x["code"] in _complete_codes]}
+check(_cfg_last["stocks"], "%s 沒有任何標的的股價，測試前提不成立" % _last)
+old_status = update_daily.one_day(_last, _cfg_last)   # 歷史最後一天，一定已存在
 check(old_status[0] == "skipped",
-      "已存在的日期 %s 應該 skipped，實得 %s" % (_last, old_status))
+      "完整的一天 %s 應該 skipped，實得 %s" % (_last, old_status))
 check(snapshot() == before, "skipped 時歷史檔不該被改動")
 
 # 2) 籌碼尚未公布 → pending，不是失敗
@@ -268,6 +273,66 @@ site = build_site.build(quiet=True)
 check(site["chips"][-1]["date"] == NEW, "site.json 應該含有新的一天")
 check(NEW in [r["date"] for r in site["stocks"][0]["rows"]],
       "site.json 的股價應該含有新的一天")
+
+# 7b) 新增標的之後的自我補齊。
+#     這是 2026/09 真的踩到的 bug：one_day 只看「這天有沒有籌碼」就決定 skip，
+#     所以新加的標的在所有既有籌碼日永遠補不到股價，歷史斷在加標的的那天。
+#     現在 skip 的條件是「籌碼有了 **而且** 每個標的都有股價」。
+#     作法：把某個已存在的 (日期, 標的) 股價挖掉，看它會不會自己補回來。
+_have = {}
+for _r in store.read_prices():
+    _have.setdefault(_r["date"], set()).add(_r["code"])
+_chip_dates = [c["date"] for c in store.read_chips()]
+_hole_date = next((d for d in _chip_dates if _have.get(d)), None)
+check(_hole_date is not None, "找不到任何『有籌碼也有股價』的日子，測試前提不成立")
+
+if _hole_date:
+    # 只拿「那天本來就有股價」的標的來測，測試才不會被 repo 目前補到哪裡影響
+    _cfg2 = {"stocks": [x for x in cfg["stocks"] if x["code"] in _have[_hole_date]]}
+    _hole_code = sorted(_have[_hole_date])[0]
+    _hole_src = fetch_prices.source_of(_hole_code, cfg)
+    _kept = [r for r in store.read_prices()
+             if not (r["date"] == _hole_date and r["code"] == _hole_code)]
+    _rows = []
+    for _r in _kept:
+        _o = dict(_r)
+        for _c in ("open", "high", "low", "close", "change", "volume"):
+            _o[_c] = "" if _o[_c] is None else store._num(_o[_c])
+        _rows.append(_o)
+    store._write_atomic(store.PRICES_CSV, store.PRICE_COLS, _rows)
+
+    _roc = "%d/%s/%s" % (int(_hole_date[:4]) - 1911, _hole_date[5:7], _hole_date[8:10])
+
+    def _hole_stock_day(code, month, retries=3):
+        return {"stat": "OK", "title": "t",
+                "data": [[_roc, "1,000", "2,000", "100.00", "110.00", "90.00",
+                          "105.00", "+5.00", "50", ""]]}
+
+    def _hole_tx(month, retries=3):
+        return "%s\n%s,TX,%s,47000,47500,46800,47100,50,0.11%%,50000,一般\n" % (
+            _TX_HEAD, _hole_date, month)
+
+    taifex.fetch_day = boom            # 籌碼已經有了，絕對不可以再去抓
+    fetch_prices.fetch_raw = _hole_stock_day
+    taifut.fetch_month = _hole_tx
+    update_daily._PRICE_CACHE.clear()
+    _n_chips = len(store.read_chips())
+    _st, _msg = update_daily.one_day(_hole_date, _cfg2)
+    check(_st == "filled",
+          "缺股價的既有籌碼日應該回 filled 去補，實得 %r（%s）" % (_st, _msg))
+    _after = {(r["date"], r["code"]) for r in store.read_prices()}
+    check((_hole_date, _hole_code) in _after,
+          "%s 的 %s 股價應該被補回來" % (_hole_date, _hole_code))
+    check(len(store.read_chips()) == _n_chips, "補股價不該動到籌碼")
+
+    # 補齊之後再跑一次 → 這次才該是 skipped，而且完全不再連外
+    update_daily._PRICE_CACHE.clear()
+    fetch_prices.fetch_raw = boom
+    taifut.fetch_month = boom
+    _st2, _ = update_daily.one_day(_hole_date, _cfg2)
+    check(_st2 == "skipped", "補齊之後應該 skipped，實得 %r" % _st2)
+    print("  新標的自我補齊：既有籌碼日缺 %s 的股價 → filled 補上（不重抓籌碼），"
+          "補完再跑才 skipped" % _hole_code)
 
 # 8) config 新增了股票、但還沒補抓它的股價 → build_site 只能警告，不能中止。
 #    workflow 是「先跑測試（會呼叫 build_site）再補抓股價」，
