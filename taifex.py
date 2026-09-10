@@ -32,6 +32,8 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+import netssl
+
 BASE = "https://www.taifex.com.tw"
 UA = "Mozilla/5.0 (compatible; chips-kline/1.0)"
 
@@ -255,14 +257,15 @@ def _post(path: str, form: dict, encoding: str, retries: int = 3) -> str:
                 BASE + path, data=body,
                 headers={"User-Agent": UA,
                          "Content-Type": "application/x-www-form-urlencoded"})
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=45,
+                                        context=netssl.context()) as resp:
                 raw = resp.read()
             return raw.decode(encoding, errors="replace")
         except (urllib.error.URLError, OSError) as e:
             last = e
             if attempt < retries:
                 time.sleep(3 * attempt)
-    raise TaifexError("連線 %s 失敗：%s" % (path, last))
+    raise TaifexError("連線 %s 失敗：%s%s" % (path, last, netssl.explain(last)))
 
 
 def fetch_day(date: str, sleep: float = 3.0) -> dict:

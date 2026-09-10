@@ -27,6 +27,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import netssl  # noqa: E402
 import store   # noqa: E402
 import taifut  # noqa: E402
 
@@ -94,7 +95,8 @@ def fetch_raw(stock_no, month, retries=3):
     for attempt in range(1, retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=45,
+                                        context=netssl.context()) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             if payload.get("stat") != "OK":
                 raise FetchError("%s %s 回傳 stat=%r（該月可能還沒有資料）"
@@ -108,7 +110,8 @@ def fetch_raw(stock_no, month, retries=3):
             last = e
             if attempt < retries:
                 time.sleep(3 * attempt)
-    raise FetchError("%s %s 連線失敗：%s" % (stock_no, month, last))
+    raise FetchError("%s %s 連線失敗：%s%s"
+                     % (stock_no, month, last, netssl.explain(last)))
 
 
 def load_cached(stock_no, month):

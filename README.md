@@ -74,6 +74,13 @@ python3 update_daily.py --dry-run              # 只抓不寫
 現在還會檢查每個標的當天有沒有股價，缺誰補誰、不重抓籌碼、也不動其他標的。
 所以**加新標的之後跑一次 `--days N` 就會自己補齊**。
 
+**憑證驗證永遠開著。** macOS 用 python.org 版的 Python 不吃系統鑰匙圈，
+沒跑過 `Install Certificates.command` 的話本機信任庫是空的，任何 https 都會是
+`CERTIFICATE_VERIFY_FAILED`（GitHub Actions 不會遇到，所以只有本機會炸）。
+`netssl.py` 在這種時候改用 `certifi` 那份根憑證，**不是**關掉驗證——
+關掉就等於接受任何人冒充期交所回假資料，那比抓不到資料糟得多。
+兩者都沒有時直接失敗，並在錯誤訊息裡寫清楚怎麼修。診斷用 `python3 netssl.py`。
+
 **解析不到就報錯，不回 0。** 期交所是 HTML 表格，改版遲早會壞。找不到
 「臺股期貨 → 外資」那一列時流程直接失敗——默默寫個 0 進歷史檔，那種錯誤要幾個月後才會發現。
 
@@ -111,6 +118,7 @@ taifex.py                         期交所籌碼抓取與解析（五欄）
 taifut.py                         台指期近月日 K 抓取與解析
 fetch_prices.py                   證交所股價抓取
 store.py                          append-only 歷史檔讀寫（原子寫入、冪等）
+netssl.py                         HTTPS 憑證設定（可單獨執行做連線診斷）
 build_site.py                     歷史檔 → data/site.json（結算日自動推算）
 update_daily.py                   每日流程：抓取 → 驗證閘門 → append → build
 build_artifact.py                 打包成 dist/single.html 單一檔案
@@ -132,6 +140,7 @@ MA20 也自然有暖身資料，不必額外維護一份 warmup。
 python3 tests/test_taifex.py        # 期交所籌碼解析器（fixture 是 07/13、08/19、08/31 的真實回應）
 python3 tests/test_taifut.py        # 台指期近月（fixture 跨 8 月結算日，涵蓋換月）
 python3 tests/test_update_daily.py  # 每日流程的行為（冪等、五欄同進退、失敗不寫檔）
+python3 tests/test_netssl.py        # HTTPS 憑證（驗證不能被關掉、信任庫空時改用 certifi）
 python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際頁面逐格比對
 ```
 

@@ -59,6 +59,7 @@ jobs:
           python3 tests/test_taifex.py
           python3 tests/test_taifut.py
           python3 tests/test_update_daily.py
+          python3 tests/test_netssl.py
 
       # 新增股票之後用。update_daily 對已經有籌碼的日子會整天略過，
       # 所以新股票的歷史股價不會被補上——這一步是專門補那個洞的。

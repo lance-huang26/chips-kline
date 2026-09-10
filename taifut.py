@@ -30,6 +30,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import netssl
+
 BASE = "https://www.taifex.com.tw"
 PATH = "/cht/3/futDataDown"
 UA = "Mozilla/5.0 (compatible; chips-kline/1.0)"
@@ -75,14 +77,16 @@ def fetch_month(month: str, retries: int = 3) -> str:
                 BASE + PATH, data=body,
                 headers={"User-Agent": UA,
                          "Content-Type": "application/x-www-form-urlencoded"})
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=45,
+                                        context=netssl.context()) as resp:
                 raw = resp.read()
             return raw.decode("big5", errors="replace")
         except (urllib.error.URLError, OSError) as e:
             last = e
             if attempt < retries:
                 time.sleep(3 * attempt)
-    raise TaifutError("台指期 %s 連線失敗：%s" % (month, last))
+    raise TaifutError("台指期 %s 連線失敗：%s%s"
+                      % (month, last, netssl.explain(last)))
 
 
 def _num(s):
