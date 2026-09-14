@@ -354,6 +354,52 @@ except Exception as e:
                  % (type(e).__name__, e))
 print("  新增股票：還沒補抓股價時 build_site 只警告不中止（不然 workflow 會死鎖）")
 
+# 9) 排程改成回看一週（--days 7）而不是只抓當天，因為 GitHub 可能整天不派送排程，
+#    只抓當天的話那天就永遠是個洞。這一條釘住「回看一週幾乎不花成本」——
+#    已經完整的日子必須一個請求都不發，否則每天多打幾十次外部 API 就不划算了。
+with open(cfg_path, "w", encoding="utf-8") as f:       # 先把 8) 加的測試股票拿掉
+    raw["stocks"] = [s for s in raw["stocks"] if s["code"] != "9999"]
+    json.dump(raw, f, ensure_ascii=False)
+cfg9 = build_site.load_config()
+
+_today = store.read_chips()[-1]["date"]
+_week = update_daily.choose_dates(days=7, today=_today)
+check(0 < len(_week) <= 7 and _week[-1] == _today,
+      "--days 7 應該回最近 7 個日曆日裡的工作日、以今天結尾，實得 %s" % _week)
+check(all(d.replace("/", "") <= _today.replace("/", "") for d in _week),
+      "--days 7 不該產生未來的日期：%s" % _week)
+
+# 先把這一週補成「完整」。不能假設真實歷史剛好是完整的——
+# 這條測的是「完整 ⇒ 不連外」，不是「歷史目前完不完整」。
+_have9 = {(r["date"], r["code"]) for r in store.read_prices()}
+_chips9 = {r["date"] for r in store.read_chips()}
+_fill = [{"date": d, "code": s["code"], "open": 100.0, "high": 110.0,
+          "low": 90.0, "close": 105.0, "change": 5.0, "volume": 50}
+         for d in _week if d in _chips9
+         for s in cfg9["stocks"] if (d, s["code"]) not in _have9]
+if _fill:
+    store.upsert_prices(_fill)
+_week = [d for d in _week if d in _chips9]      # 沒籌碼的日子（假日）本來就該去抓
+check(_week, "這一週應該至少有一天是有籌碼的，否則這條測試沒測到東西")
+
+taifex.fetch_day = boom            # 這一輪完全不可以連外
+fetch_prices.fetch_raw = boom
+taifut.fetch_month = boom
+update_daily._PRICE_CACHE.clear()
+before9 = snapshot()
+_sweep = []
+for _d9 in _week:
+    try:
+        _sweep.append(update_daily.one_day(_d9, cfg9)[0])
+    except Exception as e:                                   # noqa: BLE001
+        fails.append("完整的 %s 不該發出任何請求，卻打到抓取層：%s" % (_d9, e))
+        _sweep.append("EXPLODED")
+check(set(_sweep) <= {"skipped"},
+      "歷史已經完整時，回看一週應該每天都是 skipped，實得 %s" % _sweep)
+check(snapshot() == before9, "只是掃過已完整的日子，不該動到任何歷史檔")
+print("  排程回看一週：%d 個工作日全部 skipped，對外請求 0 次（所以 --days 7 幾乎免費）"
+      % len(_week))
+
 shutil.rmtree(work, ignore_errors=True)
 
 print()
