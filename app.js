@@ -72,6 +72,31 @@
   function cls(n) { return n > 0 ? 'pos' : (n < 0 ? 'neg' : ''); }
   function el(id) { return document.getElementById(id); }
 
+  /* 記住上次選的區間與標的。
+   *
+   * localStorage 在幾種情況下會直接丟例外（Safari 的無痕模式、瀏覽器設定擋掉
+   * 網站資料、用 file:// 直開時的 opaque origin），而且讀回來的值可能是
+   * 上一版留下的舊選項。所以讀寫都包 try/catch，而且讀回來的值一律要
+   * 通過驗證才採用——存過的股票代碼可能已經從 config 移除了。
+   *
+   * 只記「區間」和「主要標的」這兩個純畫面偏好。門檻和十大口徑不記：
+   * 那兩個會改變判讀結果，應該以 config.json 為準，不然哪天不小心點過一次，
+   * 之後每次打開看到的都是自己都忘了設過的東西。
+   */
+  var PREF_KEY = 'chips-kline:ui';
+  function loadPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem(PREF_KEY)) || {};
+    } catch (e) { return {}; }
+  }
+  function savePref(k, v) {
+    try {
+      var p = loadPrefs();
+      p[k] = v;
+      localStorage.setItem(PREF_KEY, JSON.stringify(p));
+    } catch (e) { /* 存不了就算了，不影響任何功能 */ }
+  }
+
   /* 十大交易人的兩種口徑。
    *
    * 期交所的大額交易人表格對 TX 會出好幾列，差在「到期月份」：
@@ -322,6 +347,7 @@
       b.className = (n === S.win) ? 'on' : '';
       b.onclick = function () {
         S.win = n;
+        savePref('win', n);
         Array.prototype.forEach.call(wseg.children, function (c) {
           c.className = (Number(c.dataset.win) === S.win) ? 'on' : '';
         });
@@ -340,6 +366,7 @@
       b.className = (st.code === S.primary) ? 'on' : '';
       b.onclick = function () {
         S.primary = st.code;
+        savePref('stock', st.code);
         Array.prototype.forEach.call(seg.children, function (c) {
           c.className = (c.dataset.code === S.primary) ? 'on' : '';
         });
@@ -854,6 +881,14 @@
     if (site.windowOptions) WINDOW_OPTIONS = site.windowOptions;
     if (site.defaultWindow !== undefined) { DEFAULT_WINDOW = site.defaultWindow; S.win = DEFAULT_WINDOW; }
     if (site.defaultThreshold !== undefined) { DEFAULT_THRESHOLD = site.defaultThreshold; }
+
+    // 上次選的區間與標的。存過的值可能已經不存在了（config 改過區間選項、
+    // 移掉某檔股票），所以一律驗過才用，驗不過就當作沒存過、回到預設。
+    var pref = loadPrefs();
+    if (WINDOW_OPTIONS.indexOf(pref.win) >= 0) S.win = pref.win;
+    if (site.stocks.some(function (s) { return s.code === pref.stock; })) {
+      S.primary = pref.stock;
+    }
 
     applyWindow();
     S.bias = computeBias();      // 均線用全部歷史算，不受視窗影響

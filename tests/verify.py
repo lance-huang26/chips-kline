@@ -242,6 +242,49 @@ with sync_playwright() as pw:
                        const out = {};
                        o.series.forEach(s => { if (s.name) out[s.name] = s.data; });
                        return out; }""")
+    # ---------- 區間與標的要記得住 ----------
+    # 在補齊後的那份副本上做（同一個 file:// 目錄 = 同一個 origin）。
+    # 重點是「重新整理之後還在」，所以一定要真的 reload，不能只看變數。
+    _pick_win = 20
+    _pick_stock = pg.evaluate(
+        """() => { const bs = [...document.querySelectorAll('#stockSeg button')];
+                   return bs[bs.length - 1].dataset.code; }""")
+    pg.evaluate("""(w) => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === w); if (b) b.click(); }""",
+                _pick_win)
+    pg.evaluate("""(c) => { const b = [...document.querySelectorAll('#stockSeg button')]
+                            .find(x => x.dataset.code === c); if (b) b.click(); }""",
+                _pick_stock)
+    pg.wait_for_timeout(150)
+    saved = pg.evaluate("() => localStorage.getItem('chips-kline:ui')")
+
+    pg.reload()
+    pg.wait_for_selector("#dataTable tbody tr")
+    after_reload = pg.evaluate(
+        """() => ({
+             win: (document.querySelector('#winSeg button.on') || {}).dataset,
+             stock: (document.querySelector('#stockSeg button.on') || {}).dataset,
+             rows: document.querySelectorAll('#dataTable tbody tr').length
+           })""")
+
+    # 存了一個已經不存在的股票代碼 / 不在選項裡的區間 → 要退回預設，不能壞掉
+    pg.evaluate("""() => localStorage.setItem('chips-kline:ui',
+                     JSON.stringify({win: 7777, stock: 'NOPE'}))""")
+    pg.reload()
+    pg.wait_for_selector("#dataTable tbody tr")
+    after_bogus = pg.evaluate(
+        """() => ({
+             win: (document.querySelector('#winSeg button.on') || {}).dataset,
+             stock: (document.querySelector('#stockSeg button.on') || {}).dataset
+           })""")
+
+    # 存了一段壞掉的 JSON → 也要當作沒存過
+    pg.evaluate("() => localStorage.setItem('chips-kline:ui', '{壞掉的')")
+    pg.reload()
+    pg.wait_for_selector("#dataTable tbody tr")
+    after_broken = pg.evaluate(
+        "() => (document.querySelector('#winSeg button.on') || {}).dataset")
+
     b.close()
     _sh.rmtree(_tmp, ignore_errors=True)
 
@@ -545,8 +588,12 @@ if "backfill_large" not in scope_locked_note:
 
 if scope_ready[1]["disabled"]:
     fails.append("補齊近月欄位之後，「近月」不該還鎖著")
-if not scope_ready[0]["on"]:
-    fails.append("預設應該是「所有契約」（config 的 defaultLargeScope）")
+_def_scope = prices.get("defaultLargeScope", "all")
+_on = [x["label"] for x in scope_ready if x["on"]]
+_want_scope = "近月" if _def_scope == "front" else "所有契約"
+if _on != [_want_scope]:
+    fails.append("預設口徑應該跟著 config 的 defaultLargeScope=%r 選 %s，實得 %s"
+                 % (_def_scope, _want_scope, _on))
 
 _name_all = "前十大交易人（所有契約）"
 _name_front = "前十大交易人（近月）"
@@ -582,6 +629,31 @@ if scope_series["all"].get("五票總分") == scope_series["front"].get("五票�
     fails.append("兩種口徑算出完全一樣的總分——這組測試資料是故意反號的，不可能相同，"
                  "切換多半沒有真的生效")
 print("口徑切換：未補齊時「近月」鎖住；補齊後可切，數列、序列名稱與五票總分都跟著換")
+
+# ---------- 區間與標的記憶 ----------
+if not saved or '"win"' not in saved or '"stock"' not in saved:
+    fails.append("點過區間與標的之後，localStorage 應該有記錄，實得 %r" % saved)
+if not after_reload["win"] or int(after_reload["win"]["win"]) != _pick_win:
+    fails.append("重新整理之後區間沒有還原成最近 %d 日，實得 %s"
+                 % (_pick_win, after_reload["win"]))
+if after_reload["rows"] != _pick_win:
+    fails.append("區間記住了但表格沒有跟著只剩 %d 列，實得 %d 列"
+                 % (_pick_win, after_reload["rows"]))
+if not after_reload["stock"] or after_reload["stock"]["code"] != _pick_stock:
+    fails.append("重新整理之後主要標的沒有還原成 %s，實得 %s"
+                 % (_pick_stock, after_reload["stock"]))
+# 存了無效值時要安靜退回預設（site.json 的 defaultWindow 與第一檔股票）
+_def_win = prices.get("defaultWindow", 60)
+_def_stock = prices["stocks"][0]["code"]
+if not after_bogus["win"] or int(after_bogus["win"]["win"]) != _def_win:
+    fails.append("存了不存在的區間時應該退回預設 %s，實得 %s"
+                 % (_def_win, after_bogus["win"]))
+if not after_bogus["stock"] or after_bogus["stock"]["code"] != _def_stock:
+    fails.append("存了已移除的股票代碼時應該退回預設 %s，實得 %s"
+                 % (_def_stock, after_bogus["stock"]))
+if not after_broken or int(after_broken["win"]) != _def_win:
+    fails.append("localStorage 是壞掉的 JSON 時應該當作沒存過，實得 %s" % after_broken)
+print("記憶：區間與標的重新整理後還在；存到無效值或壞 JSON 時安靜退回預設")
 
 print("\n統計卡：", stats)
 print("門檻說明：", thr_note.strip()[:160])
