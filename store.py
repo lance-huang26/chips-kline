@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """append-only 歷史檔的讀寫。
 
-  data/history/chips.csv    date,foreign_fut,top10_trader,top10_specific,foreign_opt,dealer_opt
+  data/history/chips.csv    date,foreign_fut,top10_trader,top10_specific,
+                            top10_trader_front,top10_specific_front,foreign_opt,dealer_opt
   data/history/prices.csv   date,code,open,high,low,close,change,volume
 
 用 CSV 是因為每天只 append 一行，git diff 一眼看得出當天抓到什麼。
@@ -27,19 +28,26 @@ CHIPS_CSV = os.path.join(HISTORY, "chips.csv")
 PRICES_CSV = os.path.join(HISTORY, "prices.csv")
 
 CHIP_COLS = ["date", "foreign_fut", "top10_trader", "top10_specific",
+             "top10_trader_front", "top10_specific_front",
              "foreign_opt", "dealer_opt"]
+
+# 後來才加的欄位。舊的 chips.csv 沒有這兩欄，讀進來會是 None（不是 0）——
+# 0 是一個看起來很合理的數字，混進去之後幾乎不可能被發現，所以寧可留空。
+CHIP_OPTIONAL = ("top10_trader_front", "top10_specific_front")
 PRICE_COLS = ["date", "code", "open", "high", "low", "close", "change", "volume"]
 
 
-def _read(path, cols):
+def _read(path, cols, optional=()):
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     for r in rows:
-        missing = [c for c in cols if c not in r]
+        missing = [c for c in cols if c not in r and c not in optional]
         if missing:
             raise ValueError("%s 少了欄位 %s" % (path, missing))
+        for c in optional:
+            r.setdefault(c, "")
     return rows
 
 
@@ -61,10 +69,16 @@ def _write_atomic(path, cols, rows):
 
 # ------------------------------------------------------------------ 籌碼
 def read_chips():
-    rows = _read(CHIPS_CSV, CHIP_COLS)
+    rows = _read(CHIPS_CSV, CHIP_COLS, optional=CHIP_OPTIONAL)
     for r in rows:
         for c in CHIP_COLS[1:]:
-            r[c] = int(r[c])
+            v = r[c]
+            if v in ("", None):
+                if c not in CHIP_OPTIONAL:
+                    raise ValueError("%s 的 %s 是空的——歷史檔壞了" % (r["date"], c))
+                r[c] = None
+            else:
+                r[c] = int(v)
     return sorted(rows, key=lambda r: r["date"])
 
 
@@ -73,7 +87,7 @@ def upsert_chips(new_rows, force=False):
     cur = {r["date"]: r for r in read_chips()}
     added = updated = skipped = 0
     for r in new_rows:
-        row = {c: r[c] for c in CHIP_COLS}
+        row = {c: r.get(c) for c in CHIP_COLS}
         d = row["date"]
         if d not in cur:
             cur[d] = row
@@ -83,9 +97,44 @@ def upsert_chips(new_rows, force=False):
             updated += 1
         else:
             skipped += 1
-    _write_atomic(CHIPS_CSV, CHIP_COLS,
-                  [cur[d] for d in sorted(cur)])
+    out = []
+    for d in sorted(cur):
+        r = dict(cur[d])
+        for c in CHIP_OPTIONAL:
+            r[c] = "" if r.get(c) is None else r[c]
+        out.append(r)
+    _write_atomic(CHIPS_CSV, CHIP_COLS, out)
     return added, updated, skipped
+
+
+def patch_chips(patches):
+    """只改既有日期的某幾欄，其他欄位一個位元組都不動。
+
+    給 backfill_large.py 用——回補新加的欄位時，絕對不可以把當初抓到的
+    foreign_fut / 選擇權那些值一起重寫，那樣就失去「歷史是當天抓到什麼」的意義了。
+    回傳 (更新筆數, 找不到日期的筆數)。
+    """
+    cur = {r["date"]: r for r in read_chips()}
+    changed = missing = 0
+    for p in patches:
+        d = p["date"]
+        if d not in cur:
+            missing += 1
+            continue
+        before = dict(cur[d])
+        for k, v in p.items():
+            if k != "date":
+                cur[d][k] = v
+        if cur[d] != before:
+            changed += 1
+    out = []
+    for d in sorted(cur):
+        r = dict(cur[d])
+        for c in CHIP_OPTIONAL:
+            r[c] = "" if r.get(c) is None else r[c]
+        out.append(r)
+    _write_atomic(CHIPS_CSV, CHIP_COLS, out)
+    return changed, missing
 
 
 # ------------------------------------------------------------------ 股價

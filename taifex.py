@@ -44,6 +44,10 @@ FUT_COMMODITY = "臺股期貨"
 OPT_COMMODITY = "臺指選擇權"
 LARGE_CONTRACT = "TX"
 LARGE_ALL_MONTHS = "999999"      # 所有契約
+# 期交所在「到期月份(週別)」欄用幾個假月份當彙總列：
+#   999999 = 所有契約、666666 = 所有週別契約。
+# 兩個都是 6 位數，所以不能只用「長度 6」來認真正的月份，要看月份位是不是 01~12。
+LARGE_PSEUDO_MONTHS = {"999999", "666666"}
 IDENTITIES = ("自營商", "投信", "外資")
 SIDES = ("買權", "賣權")
 
@@ -209,10 +213,38 @@ def parse_opt(rows: list, date: str) -> dict:
 LARGE_HEADER_HINT = "前十大交易人買方"
 
 
-def parse_large(csv_text: str, date: str) -> dict:
-    """TX、到期月份 999999、交易人類別 0（全體）與 1（特定法人）。
+def is_real_month(m: str) -> bool:
+    """真正的到期月份（YYYYMM），不是 999999 / 666666 這種彙總列。"""
+    m = (m or "").strip()
+    return (len(m) == 6 and m.isdigit() and m not in LARGE_PSEUDO_MONTHS
+            and 1 <= int(m[4:]) <= 12)
 
-    前十大交易人買方 − 前十大交易人賣方。
+
+def parse_large(csv_text: str, date: str) -> dict:
+    """TX 的前十大買方 − 賣方，兩種口徑各取「全體（類別 0）」與「特定法人（類別 1）」。
+
+      * 所有契約 —— 到期月份 999999，含遠月。
+      * 近月     —— 當天最小的真實到期月份，和市面上的看盤 App 一致。
+
+    兩種口徑會差很多，有時候連正負號都相反（2026/09/14：所有契約 +4,557、
+    近月 +549；特定人更是 +1,705 對 -1,790），所以兩個都存，由前端決定要看哪個。
+    近月會在結算後自動換月，跟台指期近月 K 線是同一個邏輯。
+    """
+    got = parse_large_range(csv_text)
+    if not got:
+        raise NoDataForDate("大額交易人 %s 沒有 %s 的資料" % (date, LARGE_CONTRACT))
+    if set(got) != {date}:
+        raise TaifexError(
+            "大額交易人回傳的日期是 %s，不是要的 %s——沒有寫入任何資料"
+            % (sorted(got), date))
+    return got[date]
+
+
+def parse_large_range(csv_text: str) -> dict:
+    """一次解析多天（端點的 queryStartDate/queryEndDate 可以跨日）。
+
+    回傳 {日期: {top10_trader, top10_specific, top10_trader_front,
+                 top10_specific_front, _front_month}}。
     """
     lines = [l for l in csv_text.replace("\r", "").split("\n") if l.strip()]
     if not lines or LARGE_HEADER_HINT not in lines[0]:
@@ -221,30 +253,40 @@ def parse_large(csv_text: str, date: str) -> dict:
             "多半是表單欄位少帶被導去錯誤頁——注意 HTTP 200 不代表成功。"
             % (lines[0][:80] if lines else ""))
 
-    got = {}
-    seen_date = set()
+    raw = {}                 # {日期: {到期月份: {交易人類別: 淨額}}}
     for line in lines[1:]:
         c = [x.strip() for x in line.split(",")]
         if len(c) < 9 or c[1] != LARGE_CONTRACT:
             continue
-        seen_date.add(c[0])
-        if c[3] != LARGE_ALL_MONTHS:
-            continue
-        got[c[4]] = to_int(c[7]) - to_int(c[8])
+        raw.setdefault(c[0], {}).setdefault(c[3], {})[c[4]] = \
+            to_int(c[7]) - to_int(c[8])
 
-    if not seen_date:
-        raise NoDataForDate("大額交易人 %s 沒有 %s 的資料" % (date, LARGE_CONTRACT))
-    if seen_date != {date}:
-        raise TaifexError(
-            "大額交易人回傳的日期是 %s，不是要的 %s——沒有寫入任何資料"
-            % (sorted(seen_date), date))
-    for k in ("0", "1"):
-        if k not in got:
+    out = {}
+    for date, by_month in raw.items():
+        months = sorted(m for m in by_month if is_real_month(m))
+        if not months:
             raise TaifexError(
-                "大額交易人 %s 找不到 %s / %s / 交易人類別 %s，期交所可能改版了"
-                % (date, LARGE_CONTRACT, LARGE_ALL_MONTHS, k))
+                "大額交易人 %s 只有彙總列、沒有任何真實到期月份（看到 %s）——"
+                "期交所可能改版了，沒有寫入任何資料" % (date, sorted(by_month)))
+        front = months[0]    # 最小的月份 = 近月
+        row = {"_front_month": front}
+        for key, month in (("", LARGE_ALL_MONTHS), ("_front", front)):
+            block = by_month.get(month, {})
+            for k, name in (("0", "top10_trader"), ("1", "top10_specific")):
+                if k not in block:
+                    raise TaifexError(
+                        "大額交易人 %s 找不到 %s / %s / 交易人類別 %s，期交所可能改版了"
+                        % (date, LARGE_CONTRACT, month, k))
+                row[name + key] = block[k]
+        out[date] = row
+    return out
 
-    return {"top10_trader": got["0"], "top10_specific": got["1"]}
+
+def fetch_large_range(start: str, end: str) -> str:
+    """大額交易人 CSV，一次抓一個日期區間（回補用）。"""
+    return _post("/cht/3/largeTraderFutDown",
+                 dict(FORM_BASE, queryStartDate=start, queryEndDate=end,
+                      contractId=""), "big5")
 
 
 # --------------------------------------------------------------- 連線
@@ -299,10 +341,13 @@ def fetch_day(date: str, sleep: float = 3.0) -> dict:
         "foreign_fut": foreign_fut,
         "top10_trader": large["top10_trader"],
         "top10_specific": large["top10_specific"],
+        "top10_trader_front": large["top10_trader_front"],
+        "top10_specific_front": large["top10_specific_front"],
         "foreign_opt": opt["foreign_opt"],
         "dealer_opt": opt["dealer_opt"],
         "_raw": {"fut": fut_html, "opt": opt_html, "large": large_csv},
         "_detail": opt["_detail"],
+        "_front_month": large["_front_month"],
     }
 
 
@@ -319,6 +364,7 @@ def _check_page_date(html: str, date: str, what: str):
 
 
 CHIP_FIELDS = ("foreign_fut", "top10_trader", "top10_specific",
+               "top10_trader_front", "top10_specific_front",
                "foreign_opt", "dealer_opt")
 
 

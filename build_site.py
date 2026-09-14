@@ -99,6 +99,7 @@ def build(quiet=False):
         "defaultThreshold": cfg["defaultThreshold"],
         "thresholdPresets": cfg["thresholdPresets"],
         "defaultWindow": cfg["defaultWindow"],
+        "defaultLargeScope": cfg.get("defaultLargeScope", "all"),
         "windowOptions": cfg["windowOptions"],
         "settlements": settlements(chip_dates, cfg.get("settlementOverrides", {})),
         "chips": [{k: c[k] for k in store.CHIP_COLS} for c in chips],

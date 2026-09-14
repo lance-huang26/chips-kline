@@ -40,5 +40,6 @@
     120,
     0
   ],
-  "settlementOverrides": {}
+  "settlementOverrides": {},
+  "defaultLargeScope": "all"
 }

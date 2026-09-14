@@ -13,13 +13,15 @@ ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟�
 
 ## 資料從哪來
 
-五個籌碼欄位**全部來自期交所**，沒有手動步驟、沒有二手來源：
+籌碼欄位**全部來自期交所**，沒有手動步驟、沒有二手來源：
 
 | 欄位 | 來源 | 取值 |
 |---|---|---|
 | `foreign_fut` | 三大法人-區分各期貨契約 | 臺股期貨 → 外資 → 未平倉多空淨額（口數） |
-| `top10_trader` | 期貨大額交易人未沖銷部位 | TX / 到期月份 999999 / 交易人類別 0 → 前十大買方 − 賣方 |
+| `top10_trader` | 期貨大額交易人未沖銷部位 | TX / 到期月份 **999999（所有契約）** / 交易人類別 0 → 前十大買方 − 賣方 |
 | `top10_specific` | 同上 | 同上，交易人類別 1 |
+| `top10_trader_front` | 同上 | 同上，但到期月份取**當天最小的真實月份（近月）** |
+| `top10_specific_front` | 同上 | 同上，交易人類別 1 |
 | `foreign_opt` | 三大法人-區分各選擇權契約 | 臺指選擇權 外資：買權未平倉淨額 − 賣權未平倉淨額 |
 | `dealer_opt` | 同上 | 同上，自營商 |
 
@@ -40,6 +42,31 @@ ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟�
 所有「近月連續」都有這個性質，本專案不做還原、只如實記錄；
 MA20 與乖離率會吸收到這個跳空，判讀時要有數。
 
+### 十大交易人有兩種口徑
+
+期交所的大額交易人表格對 TX 會出好幾列，差在「到期月份(週別)」欄：
+
+* `999999` ＝ **所有契約**，含遠月部位。
+* 當天最小的真實月份（例如 `202609`）＝ **近月**，市面上的看盤 App 顯示的就是這個。
+* 另外還有 `666666`（所有週別契約）這種彙總列。它也是 6 位數，所以不能只靠
+  「長度 6」認月份——判斷條件是月份位要落在 01~12。
+
+兩者差很多，2026/09/14 甚至方向相反：
+
+| | 全體（類別 0） | 特定法人（類別 1） |
+|---|---|---|
+| 所有契約 999999 | +4,557 | **+1,705** |
+| 近月 202609 | +549 | **−1,790** |
+
+所以**兩個都存**，畫面上可以切換（控制列「十大交易人口徑」），第 2、3 票跟著換。
+`config.json` 的 `defaultLargeScope` 決定預設用哪一個（`all` / `front`）。
+
+近月會在結算日**當天**就換月——到期的那個月份在結算日的大額交易人報表裡已經消失
+（2026/08/19 只剩 202609）。這比台指期 K 線的換月早一天，兩者不必一致。
+
+要驗證某天到底取了哪幾列，打開 `data/raw/chips/YYYY-MM-DD.txt`，最下面那段就是當天
+實際用到的原始列，到期月份欄一看就知道。
+
 口徑說明：`foreign_fut` 是純大台（TX）；`top10_*` 是 `TX+MTX/4+TMF/20` 合併口徑
 ——期交所在 `TX` 這個代碼底下公布的就已經是合併值（CSV 的商品名稱欄直接寫著），
 不需要自己加權。兩者口徑不同，本頁只各自獨立呈現與投票，**不做相加減**。
@@ -53,6 +80,7 @@ python3 update_daily.py --days 120             # 回填最近 120 天（≒ 四�
 python3 update_daily.py --from 2026/06/01      # 從某天到今天
 python3 update_daily.py --from 2026/06/01 --to 2026/07/31
 python3 update_daily.py --dry-run              # 只抓不寫
+python3 backfill_large.py                      # 回補十大交易人的「近月」欄位（加欄位後跑一次）
 ```
 
 離開碼：`0` 正常（含「今天還沒有資料」）、`1` 抓取或解析失敗、
@@ -120,15 +148,16 @@ bot 每天會 commit 回 repo，所以你本機有未推的 commit 時 `git push
 ```
 index.html / app.js / style.css   前端（只讀 data/site.json）
 config.json                       股票清單、均線天數、門檻預設、區間選項
-taifex.py                         期交所籌碼抓取與解析（五欄）
+taifex.py                         期交所籌碼抓取與解析（七欄、兩種十大口徑）
 taifut.py                         台指期近月日 K 抓取與解析
 fetch_prices.py                   證交所股價抓取
-store.py                          append-only 歷史檔讀寫（原子寫入、冪等）
+store.py                          append-only 歷史檔讀寫（原子寫入、冪等、可只 patch 某幾欄）
+backfill_large.py                 回補十大交易人的近月欄位（按月批次抓，一次就好）
 netssl.py                         HTTPS 憑證設定（可單獨執行做連線診斷）
 build_site.py                     歷史檔 → data/site.json（結算日自動推算）
 update_daily.py                   每日流程：抓取 → 驗證閘門 → append → build
 build_artifact.py                 打包成 dist/single.html 單一檔案
-data/history/chips.csv            六欄，append-only，全部歷史
+data/history/chips.csv            八欄，append-only，全部歷史（十大兩種口徑各兩欄）
 data/history/prices.csv           date,code,open,high,low,close,change,volume
 data/raw/                         證交所原始回應 + 每日取數依據
 tests/                            見下
@@ -143,7 +172,7 @@ MA20 也自然有暖身資料，不必額外維護一份 warmup。
 ## 測試
 
 ```bash
-python3 tests/test_taifex.py        # 期交所籌碼解析器（fixture 是 07/13、08/19、08/31 的真實回應）
+python3 tests/test_taifex.py        # 期交所籌碼解析器（fixture 是 07/13、08/19、08/31、09/14 的真實回應）
 python3 tests/test_taifut.py        # 台指期近月（fixture 跨 8 月結算日，涵蓋換月）
 python3 tests/test_update_daily.py  # 每日流程的行為（冪等、五欄同進退、失敗不寫檔）
 python3 tests/test_netssl.py        # HTTPS 憑證（驗證不能被關掉、信任庫空時改用 certifi）
@@ -158,16 +187,20 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 那一列的外資淨額是 -561,385，如果誤抓，數字看起來仍然像回事，但整個判讀都會錯。
 測試會明確斷言取到的是臺股期貨的 -81,066。
 
+2026/09/14 那組則是拿看盤 App 的畫面對出來的：App 顯示 549 / -1,790，正好是近月那兩列，
+所有契約是 +4,557 / +1,705。兩組數字都明確釘住，避免哪天又被搞混。
+
 `verify.py` 會用 Python 獨立重算一次五票分數、MA20 與乖離率，再把實際渲染出來的
-表格與圖表設定逐格比對，另外還驗副圖雙軸對齊、深色主題下的表單對比度、區間切換。
+表格與圖表設定逐格比對，另外還驗副圖雙軸對齊、深色主題下的表單對比度、區間切換，
+以及十大口徑切換（未補齊時必須鎖住、補齊後切換要真的換掉第 2、3 票）。
 
 ## 五票規則
 
 | 票 | 欄位 | 判斷 |
 |---|---|---|
 | 1 | `foreign_fut` | `> 門檻` → +1，否則 -1（門檻預設 -83000，可即時調整） |
-| 2 | `top10_trader` | `> 0` → +1，否則 -1 |
-| 3 | `top10_specific` | `> 0` → +1，否則 -1 |
+| 2 | `top10_trader` | `> 0` → +1，否則 -1（口徑可切：所有契約／近月） |
+| 3 | `top10_specific` | `> 0` → +1，否則 -1（同上） |
 | 4 | `foreign_opt` | `> 0` → +1，否則 -1 |
 | 5 | `dealer_opt` | `> 0` → +1，否則 -1 |
 
@@ -186,7 +219,8 @@ python3 tests/verify.py             # 前端：用 headless 瀏覽器開實際�
 ## 改設定
 
 `config.json`：股票清單、`maPeriod`、`biasAlert`、門檻預設值與快速切換、
-區間選項、`settlementOverrides`（結算日預設取每月第三個星期三，放假順延到下一個交易日）。
+區間選項、`defaultLargeScope`（十大交易人的預設口徑）、
+`settlementOverrides`（結算日預設取每月第三個星期三，放假順延到下一個交易日）。
 改完跑 `python3 build_site.py`。
 
 ### 新增標的

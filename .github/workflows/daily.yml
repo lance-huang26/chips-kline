@@ -1,7 +1,7 @@
 name: 每日更新籌碼與股價
 
-# 排程已啟用：週一到週五台北時間 16:00 主跑、18:00 補跑。
-# 排程只抓當天；手動觸發才會用到 days / from / to / prices_months 那些參數。
+# 排程已啟用：週一到週五台北時間 16:17、18:23、22:41。
+# 排程回看一週（--days 7）；手動觸發才會用到 days / from / to / prices_months 那些參數。
 # 注意：repo 連續 60 天沒有任何活動時，GitHub 會自動停用排程並寄信通知。
 on:
   workflow_dispatch:
@@ -22,6 +22,10 @@ on:
       prices_months:
         description: "只補抓股價的月份數（新增股票後用，例如 6）。留空 = 不做"
         required: false
+      backfill_large:
+        description: "回補十大交易人的『近月』欄位（加欄位後跑一次就好）"
+        type: boolean
+        default: false
       force:
         description: "覆寫已存在的日期"
         type: boolean
@@ -77,6 +81,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 fetch_prices.py --months-back "$IN_PM"
+          python3 build_site.py
+
+      # 十大交易人有兩種口徑（所有契約 / 近月），近月是後來才加的欄位。
+      # 加欄位之前的歷史沒有那兩欄，跑一次這個補起來，之後就不需要了。
+      - name: 回補近月十大欄位（只在勾選時執行）
+        if: inputs.backfill_large == true
+        run: |
+          set -euo pipefail
+          python3 backfill_large.py
           python3 build_site.py
 
       - name: 抓取並更新

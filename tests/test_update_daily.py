@@ -58,7 +58,9 @@ NEW = _d.strftime("%Y/%m/%d")
 NEW_ROC = "%d/%02d/%02d" % (_d.year - 1911, _d.month, _d.day)
 
 CHIP = {"date": NEW, "foreign_fut": -81000, "top10_trader": 500,
-        "top10_specific": -300, "foreign_opt": 120, "dealer_opt": -80,
+        "top10_specific": -300,
+        "top10_trader_front": -120, "top10_specific_front": -900,
+        "foreign_opt": 120, "dealer_opt": -80,
         "_raw": {"fut": "<table></table>", "opt": "<table></table>",
                  "large": "日期,x\n%s,TX" % NEW},
         "_detail": {}}
@@ -399,6 +401,43 @@ check(set(_sweep) <= {"skipped"},
 check(snapshot() == before9, "只是掃過已完整的日子，不該動到任何歷史檔")
 print("  排程回看一週：%d 個工作日全部 skipped，對外請求 0 次（所以 --days 7 幾乎免費）"
       % len(_week))
+
+# 10) 近月十大那兩欄是後來才加的。舊的 chips.csv 沒有這兩欄，必須：
+#     讀得進來（而且是 None，不是 0——0 看起來太合理，混進去不可能被發現），
+#     而且 patch_chips 只能動這兩欄，其他欄位一個位元組都不准改。
+old_csv = ("date,foreign_fut,top10_trader,top10_specific,foreign_opt,dealer_opt\n"
+           "2026/01/05,-80000,100,200,300,400\n"
+           "2026/01/06,-81000,110,210,310,410\n")
+with open(store.CHIPS_CSV, "w", encoding="utf-8") as f:
+    f.write(old_csv)
+old_rows = store.read_chips()
+check(len(old_rows) == 2, "舊格式的 chips.csv 應該讀得進來，實得 %d 列" % len(old_rows))
+check(old_rows[0]["top10_trader_front"] is None
+      and old_rows[0]["top10_specific_front"] is None,
+      "舊檔沒有的欄位應該是 None，不能默默變成 0，實得 %s" % old_rows[0])
+check(old_rows[0]["foreign_fut"] == -80000 and old_rows[1]["dealer_opt"] == 410,
+      "舊欄位的值不該被動到：%s" % old_rows)
+
+changed, missing = store.patch_chips([
+    {"date": "2026/01/05", "top10_trader_front": 549,
+     "top10_specific_front": -1790},
+    {"date": "2099/12/31", "top10_trader_front": 1},     # 不存在的日期
+])
+check((changed, missing) == (1, 1),
+      "patch_chips 應該補 1 天、找不到 1 天，實得 %s" % ((changed, missing),))
+after = {r["date"]: r for r in store.read_chips()}
+check(after["2026/01/05"]["top10_trader_front"] == 549
+      and after["2026/01/05"]["top10_specific_front"] == -1790,
+      "近月欄位沒補上：%s" % after["2026/01/05"])
+check(after["2026/01/05"]["foreign_fut"] == -80000
+      and after["2026/01/05"]["top10_trader"] == 100,
+      "patch_chips 不該動到其他欄位：%s" % after["2026/01/05"])
+check(after["2026/01/06"]["top10_trader_front"] is None,
+      "沒有 patch 到的那天應該維持空的：%s" % after["2026/01/06"])
+_txt = open(store.CHIPS_CSV, encoding="utf-8").read()
+check(_txt.splitlines()[-1].endswith(",,310,410"),
+      "還沒補的那天，近月欄位應該是空字串而不是 0：%s" % _txt.splitlines()[-1])
+print("  回補近月欄位：舊檔讀得進來（缺的是 None 不是 0），patch 只動那兩欄")
 
 shutil.rmtree(work, ignore_errors=True)
 

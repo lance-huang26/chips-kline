@@ -17,8 +17,9 @@ with open(os.path.join(ROOT, "data", "history", "chips.csv"), encoding="utf-8") 
     chips = list(csv.DictReader(f))
 for c in chips:
     for k in c:
+        # 近月那兩欄是後來才加的，舊資料是空字串 → None（不能當 0）
         if k != "date":
-            c[k] = int(c[k])
+            c[k] = None if c[k] == "" else int(c[k])
 
 def score(c, thr):
     v = [1 if c["foreign_fut"] > thr else -1,
@@ -191,7 +192,58 @@ with sync_playwright() as pw:
         """(idxs) => { const o = window.__OPTS__[window.__OPTS__.length-1];
                        return idxs.map(i => o.tooltip.formatter([{dataIndex: i}])); }""",
         [0, 5, 20])
+
+    # ---------- 十大交易人的兩種口徑 ----------
+    # 歷史檔還沒補近月欄位時，那個選項必須是鎖住的。默默拿 null 去比大小
+    # 會讓第 2、3 票全部投 -1，畫面看起來仍然「正常」，這種錯最難發現。
+    scope_locked = pg.evaluate(
+        """() => [...document.querySelectorAll('#scopeSeg button')]
+                 .map(b => ({label: b.textContent, disabled: b.disabled}))""")
+    scope_locked_note = pg.eval_on_selector("#scopeNote", "e => e.textContent")
+
+    # 再開一份「已經補好近月欄位」的副本，驗切換真的會換掉第 2、3 票。
+    # 故意把近月值設成所有契約的相反數，這樣每一天的第 2、3 票都必翻。
+    import shutil as _sh, subprocess as _sp, tempfile as _tf
+    _tmp = _tf.mkdtemp(prefix="chips-scope-")
+    _p2 = os.path.join(_tmp, "proj")
+    _sh.copytree(ROOT, _p2, ignore=_sh.ignore_patterns(
+        "dist", "__pycache__", ".git", "node_modules"))
+    _cols = ["date", "foreign_fut", "top10_trader", "top10_specific",
+             "top10_trader_front", "top10_specific_front",
+             "foreign_opt", "dealer_opt"]
+    _front = []
+    with open(os.path.join(_p2, "data", "history", "chips.csv"),
+              "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=_cols, lineterminator="\n")
+        w.writeheader()
+        for c in chips:
+            r = dict(c)
+            r["top10_trader_front"] = -c["top10_trader"]
+            r["top10_specific_front"] = -c["top10_specific"]
+            _front.append(r)
+            w.writerow({k: r[k] for k in _cols})
+    _sp.run([sys.executable, "build_site.py"], cwd=_p2, check=True,
+            capture_output=True)
+
+    pg.goto("file://" + os.path.join(_p2, "index.html"))
+    pg.wait_for_selector("#dataTable tbody tr")
+    set_thr(-83000)
+    scope_ready = pg.evaluate(
+        """() => [...document.querySelectorAll('#scopeSeg button')]
+                 .map(b => ({label: b.textContent, disabled: b.disabled,
+                             on: b.className === 'on'}))""")
+    scope_series = {}
+    for _which in ("all", "front"):
+        pg.evaluate("""(k) => { const b = [...document.querySelectorAll('#scopeSeg button')]
+                                .find(x => x.dataset.scope === k); if (b) b.click(); }""", _which)
+        pg.wait_for_timeout(150)
+        scope_series[_which] = pg.evaluate(
+            """() => { const o = window.__OPTS__[window.__OPTS__.length-1];
+                       const out = {};
+                       o.series.forEach(s => { if (s.name) out[s.name] = s.data; });
+                       return out; }""")
     b.close()
+    _sh.rmtree(_tmp, ignore_errors=True)
 
 # ---------- 3. 比對 ----------
 SMALL_KEYS = ["top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]
@@ -481,6 +533,55 @@ for scheme, items in contrast.items():
                          % (scheme, it["sel"], it["ratio"], it["fg"], it["bg"]))
 print("表單對比（深色系統主題）：",
       ", ".join("%s %s:1" % (i["sel"], i["ratio"]) for i in contrast["dark"]))
+
+# ---------- 十大交易人口徑切換 ----------
+_labels = [x["label"] for x in scope_locked]
+if _labels != ["所有契約", "近月"]:
+    fails.append("口徑切換的兩個選項不對：%s" % _labels)
+if not scope_locked[1]["disabled"]:
+    fails.append("歷史檔還沒有近月欄位時，「近月」必須是鎖住的（不然會拿 null 去投票）")
+if "backfill_large" not in scope_locked_note:
+    fails.append("鎖住時要說明怎麼補，實得：%r" % scope_locked_note)
+
+if scope_ready[1]["disabled"]:
+    fails.append("補齊近月欄位之後，「近月」不該還鎖著")
+if not scope_ready[0]["on"]:
+    fails.append("預設應該是「所有契約」（config 的 defaultLargeScope）")
+
+_name_all = "前十大交易人（所有契約）"
+_name_front = "前十大交易人（近月）"
+if _name_all not in scope_series["all"]:
+    fails.append("所有契約模式下找不到序列 %r，實得 %s"
+                 % (_name_all, sorted(scope_series["all"])))
+if _name_front not in scope_series["front"]:
+    fails.append("近月模式下序列名稱應該標明口徑，實得 %s"
+                 % sorted(scope_series["front"]))
+else:
+    _got = scope_series["front"][_name_front]
+    _want = [r["top10_trader_front"] for r in _front]
+    if _got != _want:
+        fails.append("切到近月之後，前十大交易人的數列沒有換成近月值："
+                     "前 3 筆 %s vs %s" % (_got[:3], _want[:3]))
+
+# 分數也要跟著換——這才是切換真正的意義
+for _which, _k2, _k3 in (("all", "top10_trader", "top10_specific"),
+                         ("front", "top10_trader_front", "top10_specific_front")):
+    _want_total = []
+    for r in _front:
+        v = [1 if r["foreign_fut"] > -83000 else -1,
+             1 if r[_k2] > 0 else -1,
+             1 if r[_k3] > 0 else -1,
+             1 if r["foreign_opt"] > 0 else -1,
+             1 if r["dealer_opt"] > 0 else -1]
+        _want_total.append(sum(v))
+    _got_total = scope_series[_which].get("五票總分")
+    if _got_total != _want_total:
+        fails.append("%s 口徑的總分不對：前 5 筆 %s vs 應為 %s"
+                     % (_which, (_got_total or [])[:5], _want_total[:5]))
+if scope_series["all"].get("五票總分") == scope_series["front"].get("五票總分"):
+    fails.append("兩種口徑算出完全一樣的總分——這組測試資料是故意反號的，不可能相同，"
+                 "切換多半沒有真的生效")
+print("口徑切換：未補齊時「近月」鎖住；補齊後可切，數列、序列名稱與五票總分都跟著換")
 
 print("\n統計卡：", stats)
 print("門檻說明：", thr_note.strip()[:160])

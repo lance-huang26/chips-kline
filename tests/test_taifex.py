@@ -56,11 +56,49 @@ for date in sorted(fixtures):
         check(got_opt[k] == want[k], "%s %s %s != %s" % (date, k, got_opt[k], want[k]))
 
     got_lg = taifex.parse_large(fx["large_csv"], date)
-    for k in ("top10_trader", "top10_specific"):
+    for k in ("top10_trader", "top10_specific",
+              "top10_trader_front", "top10_specific_front"):
         check(got_lg[k] == want[k], "%s %s %s != %s" % (date, k, got_lg[k], want[k]))
+    check(got_lg["_front_month"] == fx["expect_front_month"],
+          "%s 近月月份 %s != %s" % (date, got_lg["_front_month"],
+                                   fx["expect_front_month"]))
 
-    print("  %s  五欄全對：%s" % (date, ", ".join(
+    print("  %s  七欄全對：%s" % (date, ", ".join(
         "%s=%s" % (k, want[k]) for k in taifex.CHIP_FIELDS)))
+
+# 十大交易人的兩種口徑。2026/09/14 這組是拿看盤 App 的畫面對出來的：
+# App 顯示 10大交易人 549、10大特定人 -1,790，正好是「近月（202609）」那兩列；
+# 「所有契約（999999）」則是 +4,557 / +1,705——連特定人的正負號都相反。
+# 誰抓錯都不是重點，重點是這兩個數字不能被搞混，所以兩邊都明確釘住。
+lg914 = taifex.parse_large(
+    open(os.path.join(HERE, "fixtures", "large_20260914.csv"),
+         encoding="utf-8").read(), "2026/09/14")
+check(lg914["top10_trader_front"] == 549 and lg914["top10_specific_front"] == -1790,
+      "2026/09/14 近月應該是 549 / -1790（看盤 App 顯示的值），實得 %s / %s"
+      % (lg914["top10_trader_front"], lg914["top10_specific_front"]))
+check(lg914["top10_trader"] == 4557 and lg914["top10_specific"] == 1705,
+      "2026/09/14 所有契約應該是 4557 / 1705，實得 %s / %s"
+      % (lg914["top10_trader"], lg914["top10_specific"]))
+check(lg914["_front_month"] == "202609",
+      "近月應該挑到 202609，不能被 666666（所有週別契約）騙走，實得 %s"
+      % lg914["_front_month"])
+check(not taifex.is_real_month("666666") and not taifex.is_real_month("999999"),
+      "666666 / 999999 是彙總列，不能當成真的到期月份")
+check(taifex.is_real_month("202601") and taifex.is_real_month("202612")
+      and not taifex.is_real_month("202613"),
+      "真實月份的判斷（月份位要落在 01~12）不對")
+print("  兩種口徑：2026/09/14 近月 549 / -1,790（和看盤 App 一致），"
+      "所有契約 4,557 / +1,705——特定人正負號相反")
+
+# 一次抓多天（回補用）：同一份 CSV 裡有幾天就要拆出幾天
+rng = taifex.parse_large_range(fixtures["2026/08/19"]["large_csv"]
+                               + fixtures["2026/08/31"]["large_csv"]
+                               .split("\n", 1)[1])
+check(sorted(rng) == ["2026/08/19", "2026/08/31"],
+      "跨日解析應該拆出兩天，實得 %s" % sorted(rng))
+check(rng["2026/08/31"]["top10_trader_front"] == 8104,
+      "跨日解析的數值不對：%s" % rng["2026/08/31"])
+print("  跨日解析：一次回兩天，各自算各自的近月（回補歷史用）")
 
 # 選擇權是「買權淨額 − 賣權淨額」，把中間值也釘住，避免哪天被改成相加
 d = "2026/08/31"

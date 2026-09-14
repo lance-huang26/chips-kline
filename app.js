@@ -17,8 +17,8 @@
 
   var CHIP_FIELDS = [
     { key: 'foreign_fut',    label: '外資台指期未平倉',   short: '外資期貨', color: '#2a78d6', axis: 'big'   },
-    { key: 'top10_trader',   label: '前十大交易人',       short: '前十大交易人', color: '#eb6834', axis: 'small' },
-    { key: 'top10_specific', label: '前十大特定人',       short: '前十大特定人', color: '#1baf7a', axis: 'small' },
+    { key: 'top10_trader',   base: '前十大交易人', label: '前十大交易人', short: '前十大交易人', color: '#eb6834', axis: 'small' },
+    { key: 'top10_specific', base: '前十大特定人', label: '前十大特定人', short: '前十大特定人', color: '#1baf7a', axis: 'small' },
     { key: 'foreign_opt',    label: '選擇權外資淨口數',   short: '選擇權外資', color: '#4a3aa7', axis: 'small' },
     { key: 'dealer_opt',     label: '選擇權自營商淨口數', short: '選擇權自營', color: '#e87ba4', axis: 'small' }
   ];
@@ -40,6 +40,7 @@
     primary: null,
     compare: false,
     threshold: DEFAULT_THRESHOLD,
+    scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
     shown: {},             // key -> bool
     bias: {}               // code -> { date: {ma, bias} }
   };
@@ -70,6 +71,50 @@
   }
   function cls(n) { return n > 0 ? 'pos' : (n < 0 ? 'neg' : ''); }
   function el(id) { return document.getElementById(id); }
+
+  /* 十大交易人的兩種口徑。
+   *
+   * 期交所的大額交易人表格對 TX 會出好幾列，差在「到期月份」：
+   *   999999 = 所有契約（含遠月）
+   *   最小的真實月份 = 近月（市面上看盤 App 顯示的就是這個）
+   *
+   * 兩者差很多，2026/09/14 連正負號都相反（所有契約 +4,557 / 特定人 +1,705，
+   * 近月 +549 / 特定人 -1,790）。所以兩份都存進歷史檔，由這裡決定畫面上用哪一份。
+   *
+   * 作法是在切視窗之前就把選中的那一份「蓋」到 top10_trader / top10_specific 上，
+   * 後面的計分、副圖、表格、hover、本日操作一律不必知道有兩種口徑這回事。
+   */
+  var SCOPES = [
+    { key: 'all',   label: '所有契約', note: '期交所「到期月份 999999」，含遠月部位。' },
+    { key: 'front', label: '近月',     note: '當天最小的到期月份，和一般看盤 App 顯示的一致；結算後自動換月。' }
+  ];
+  function applyScope() {
+    var front = (S.scope === 'front');
+    // 標籤要跟著換。圖例、tooltip、表頭都只寫「前十大交易人」的話，
+    // 截圖出去或隔天回來看，根本分不出當時看的是哪一種口徑。
+    CHIP_FIELDS.forEach(function (f) {
+      if (f.base) {
+        f.label = f.base + (front ? '（近月）' : '（所有契約）');
+        f.short = f.base + (front ? '·近月' : '·全部');
+      }
+    });
+    S.allChips = S.site.chips.map(function (c) {
+      if (!front) return c;
+      var o = {};
+      for (var k in c) { if (Object.prototype.hasOwnProperty.call(c, k)) o[k] = c[k]; }
+      o.top10_trader = c.top10_trader_front;
+      o.top10_specific = c.top10_specific_front;
+      return o;
+    });
+  }
+  // 近月欄位是後來才加的。舊資料沒有的話不能默默當 0——0 看起來很合理，
+  // 混進去幾乎不可能被發現——所以直接把那個選項鎖起來，並說要跑什麼補。
+  function frontReady() {
+    return S.site.chips.length > 0 && S.site.chips.every(function (c) {
+      return c.top10_trader_front !== null && c.top10_trader_front !== undefined &&
+             c.top10_specific_front !== null && c.top10_specific_front !== undefined;
+    });
+  }
 
   // 依目前的視窗天數，從全部歷史裡切出要顯示的那一段
   function applyWindow() {
@@ -302,6 +347,45 @@
       };
       seg.appendChild(b);
     });
+
+    var scopeSeg = el('scopeSeg'), scopeNote = el('scopeNote'), ready = frontReady();
+    scopeSeg.innerHTML = '';
+    SCOPES.forEach(function (sp) {
+      var b = document.createElement('button');
+      b.textContent = sp.label;
+      b.dataset.scope = sp.key;
+      b.className = (S.scope === sp.key) ? 'on' : '';
+      if (sp.key === 'front' && !ready) {
+        b.disabled = true;
+        b.title = '歷史檔還沒有近月欄位，先跑 python3 backfill_large.py';
+      }
+      b.onclick = function () {
+        S.scope = sp.key;
+        Array.prototype.forEach.call(scopeSeg.children, function (c) {
+          c.className = (c.dataset.scope === S.scope) ? 'on' : '';
+        });
+        applyScope();
+        applyWindow();
+        showScopeNote();
+        render();
+      };
+      scopeSeg.appendChild(b);
+    });
+    function showScopeNote() {
+      var sp = SCOPES.filter(function (x) { return x.key === S.scope; })[0];
+      var txt = sp.note;
+      if (!ready) {
+        txt += ' 近月欄位在歷史檔裡還是空的——跑 <code>python3 backfill_large.py</code> 補齊後才能切換。';
+      } else {
+        var last = S.site.chips[S.site.chips.length - 1];
+        txt += ' 最新一天（' + last.date + '）兩種口徑：所有契約 ' +
+               sign(last.top10_trader) + ' / ' + sign(last.top10_specific) +
+               '，近月 ' + sign(last.top10_trader_front) + ' / ' +
+               sign(last.top10_specific_front) + '（全體／特定人）。';
+      }
+      scopeNote.innerHTML = txt;
+    }
+    showScopeNote();
 
     var g = el('chipChks');
     g.innerHTML = '';
@@ -758,8 +842,10 @@
   function boot(site) {
     S.site = site;
     S.prices = { stocks: site.stocks };
-    S.allChips = site.chips;
     S.primary = site.stocks[0].code;
+    if (site.defaultLargeScope) S.scope = site.defaultLargeScope;
+    if (S.scope === 'front' && !frontReady()) S.scope = 'all';
+    applyScope();
 
     if (site.maPeriod) MA_PERIOD = site.maPeriod;
     if (site.biasAlert) BIAS_ALERT = site.biasAlert;
