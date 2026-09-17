@@ -42,6 +42,8 @@
     threshold: DEFAULT_THRESHOLD,
     scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
     mode: 'level',         // 計分模式：'level' 剩餘口數 / 'flow' 今日操作 / 'blend' 加權
+    pinned: null,          // 釘住的那天（存日期字串，不是索引——切區間索引會位移）
+    pinAt: null,           // 釘住時點的位置 {x, y}，用來擺面板
     shown: {},             // key -> bool
     bias: {}               // code -> { date: {ma, bias} }
   };
@@ -783,6 +785,8 @@
       ],
       axisPointer: { link: [{ xAxisIndex: 'all' }], label: { backgroundColor: '#52514e' } },
       tooltip: {
+        // 已經釘住一天時就不要再跟著游標冒出第二張卡片
+        show: S.pinned === null,
         trigger: 'axis',
         axisPointer: { type: 'cross' },
         backgroundColor: 'rgba(255,255,255,.97)',
@@ -1019,12 +1023,46 @@
     el('genLabel').textContent = g ? ('資料更新於 ' + g.replace('T', ' ').replace('Z', ' UTC')) : '';
   }
 
+  /* 點 K 線把當日明細釘住。
+   *
+   * 釘住的是「日期」而不是索引：切區間之後同一個索引會指到別天，
+   * 存索引的話面板會安靜地換成另一天的資料，那種錯很難發現。
+   * 釘住的那天不在目前視窗內時，面板收起來而不是顯示錯的資料。
+   *
+   * 內容直接重用 tooltipHtml()，所以釘住的和 hover 看到的永遠一致，
+   * 不會有兩份各自演化的排版。
+   */
+  function togglePin(date, x, y) {
+    if (S.pinned === date) { S.pinned = null; S.pinAt = null; }
+    else { S.pinned = date; S.pinAt = { x: x, y: y }; }
+    render();
+  }
+  function renderPinned(sc) {
+    var box = el('pinned');
+    var i = S.pinned === null ? -1 : S.dates.indexOf(S.pinned);
+    if (i < 0) {                       // 沒釘，或釘的那天已經不在視窗內
+      box.hidden = true;
+      return;
+    }
+    el('pinnedBody').innerHTML = tooltipHtml(i, sc);
+    box.hidden = false;
+
+    // 擺在點擊處附近，但不能超出圖表範圍
+    var wrap = box.parentNode;
+    var maxX = wrap.clientWidth - box.offsetWidth - 8;
+    var maxY = wrap.clientHeight - box.offsetHeight - 8;
+    var at = S.pinAt || { x: 12, y: 12 };
+    box.style.left = Math.max(8, Math.min(at.x + 14, Math.max(8, maxX))) + 'px';
+    box.style.top = Math.max(8, Math.min(at.y + 14, Math.max(8, maxY))) + 'px';
+  }
+
   function render() {
     var sc = scoreAll(S.threshold);
     renderHeader();
     renderStats(sc);
     chart.setOption(buildOption(sc), true);
     renderTable(sc);
+    renderPinned(sc);
   }
 
   // ---------------------------------------------------------------- 啟動
@@ -1064,7 +1102,29 @@
     checkAlignment();
 
     chart = echarts.init(el('chart'), null, { renderer: 'canvas' });
-    window.addEventListener('resize', function () { chart.resize(); });
+    window.addEventListener('resize', function () {
+      chart.resize();
+      // 只有釘住時才需要重畫——不然每次拖視窗大小都做一次完整 setOption 會卡
+      if (S.pinned !== null) render();
+    });
+
+    // 點圖上任何一天都可以釘住——用 zrender 的 click 而不是 series 的 click，
+    // 不然只有正好點在 K 棒實體上才有反應，點到棒子中間的空隙會沒事發生。
+    chart.getZr().on('click', function (e) {
+      var pt = [e.offsetX, e.offsetY];
+      var gi = chart.containPixel({ gridIndex: 0 }, pt) ? 0
+             : (chart.containPixel({ gridIndex: 1 }, pt) ? 1 : -1);
+      if (gi < 0) return;                       // 點在圖表外面
+      var i = Math.round(chart.convertFromPixel({ xAxisIndex: gi }, pt[0]));
+      if (!(i >= 0 && i < S.dates.length)) return;
+      togglePin(S.dates[i], e.offsetX, e.offsetY);
+    });
+    el('pinClose').onclick = function () { S.pinned = null; S.pinAt = null; render(); };
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && S.pinned !== null) {
+        S.pinned = null; S.pinAt = null; render();
+      }
+    });
 
     buildControls();   // 內含一次 render()
   }

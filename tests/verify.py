@@ -148,12 +148,21 @@ for c, d, b in sorted(_hot, key=lambda x: (x[0], x[1])):
 # ---------- 2. 瀏覽器端 ----------
 from playwright.sync_api import sync_playwright
 
+# ECharts 用 stub 取代（離線環境沒有 CDN）。幾何相關的 API 也要給，
+# 不然 app.js 綁 zrender 的 click 時會直接丟例外。
+# convertFromPixel 故意回傳 offsetX 本身，所以測試裡「點第 N 天」就是傳 offsetX=N。
+# 代價：真正的像素→索引換算沒被驗到（那是 ECharts 的事）；
+# 這裡驗的是釘住的開關、以日期為鍵、切區間之後的行為。
 STUB = """
 window.__OPTS__ = [];
+window.__ZR__ = { handlers: {} };
 window.echarts = {
   init: function(){ return {
     setOption: function(o){ window.__OPTS__.push(o); },
-    resize: function(){}
+    resize: function(){},
+    getZr: function(){ return { on: function(ev, fn){ window.__ZR__.handlers[ev] = fn; } }; },
+    containPixel: function(f){ return f.gridIndex === 0; },
+    convertFromPixel: function(f, x){ return x; }
   };}
 };
 """
@@ -350,6 +359,52 @@ with sync_playwright() as pw:
     mode_note_blend = pg.eval_on_selector("#modeNote", "e => e.textContent")
     pg.evaluate("""() => { const b = [...document.querySelectorAll('#modeSeg button')]
                             .find(x => x.dataset.mode === 'level'); if (b) b.click(); }""")
+    pg.wait_for_timeout(120)
+
+    # ---------- 點 K 線釘住當日明細 ----------
+    def zr_click(i):
+        pg.evaluate("(i) => window.__ZR__.handlers.click({offsetX: i, offsetY: 100})", i)
+        pg.wait_for_timeout(120)
+
+    def pin_state():
+        return pg.evaluate("""() => {
+            const box = document.getElementById('pinned');
+            const o = window.__OPTS__[window.__OPTS__.length - 1];
+            return { hidden: box.hidden,
+                     text: box.hidden ? '' : box.textContent.slice(0, 80),
+                     tooltipShown: o.tooltip.show !== false };
+        }""")
+
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
+    pg.wait_for_timeout(120)
+    pin_before = pin_state()
+    _pin_i = len(chips) - 3
+    _pin_date = chips[_pin_i]["date"]
+    zr_click(_pin_i)
+    pin_open = pin_state()
+    zr_click(_pin_i)                      # 再點同一天 → 收起來
+    pin_toggled = pin_state()
+    zr_click(_pin_i)
+    pg.eval_on_selector("#pinClose", "e => e.click()")   # 按 × → 收起來
+    pg.wait_for_timeout(120)
+    pin_closed = pin_state()
+    zr_click(_pin_i)
+    zr_click(len(chips) - 1)               # 點別天 → 換成那天，不是關掉
+    pin_moved = pin_state()
+    pin_moved_date = chips[len(chips) - 1]["date"]
+    # 釘著第 N-3 天，然後切到「最近 20 日」——如果那天落在視窗外，面板要收起來
+    zr_click(_pin_i)
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === 20); if (b) b.click(); }""")
+    pg.wait_for_timeout(150)
+    pin_after_win = pin_state()
+    pin_after_win_visible = _pin_date in set(c["date"] for c in chips[-20:])
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(120)
+    pin_after_esc = pin_state()
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
     pg.wait_for_timeout(120)
 
     # ---------- 區間與標的要記得住 ----------
@@ -833,6 +888,41 @@ print("三種計分模式：%d 天逐日與 Python 獨立重算一致（剩餘�
 if _blend:
     print("  加權模式：%d 天有分數，範圍 %+.2f ~ %+.2f，且與 clamp2 重算的結果不同"
           % (len(_blend), min(_blend), max(_blend)))
+
+# ---------- 釘住當日明細 ----------
+if not pin_before["hidden"]:
+    fails.append("還沒點任何一天，釘住面板就已經出現了")
+if not pin_before["tooltipShown"]:
+    fails.append("沒釘住時 hover 的浮動提示不該被關掉")
+if pin_open["hidden"]:
+    fails.append("點了 K 線之後釘住面板應該出現")
+elif _pin_date not in pin_open["text"]:
+    fails.append("釘住面板顯示的不是點到的那天（期望 %s，實得開頭 %r）"
+                 % (_pin_date, pin_open["text"][:40]))
+if pin_open["tooltipShown"]:
+    fails.append("釘住時應該關掉 hover 的浮動提示，不然兩張卡片會疊在一起")
+if not pin_toggled["hidden"]:
+    fails.append("再點同一天應該把釘住面板收起來")
+if pin_toggled["tooltipShown"] is False:
+    fails.append("取消釘住之後 hover 的浮動提示要回來")
+if not pin_closed["hidden"]:
+    fails.append("按 × 應該把釘住面板收起來")
+if pin_moved["hidden"]:
+    fails.append("點另一天應該改釘那天，而不是關掉")
+elif pin_moved_date not in pin_moved["text"]:
+    fails.append("點另一天之後面板沒換成那天（期望 %s）" % pin_moved_date)
+if pin_after_win_visible:
+    if pin_after_win["hidden"]:
+        fails.append("%s 仍在最近 20 日的視窗內，切區間後不該收起來" % _pin_date)
+    elif _pin_date not in pin_after_win["text"]:
+        fails.append("切區間之後面板變成別天了——釘住的應該是日期而不是索引")
+elif not pin_after_win["hidden"]:
+    fails.append("%s 已經不在最近 20 日的視窗內，面板應該收起來而不是顯示別天的資料"
+                 % _pin_date)
+if not pin_after_esc["hidden"]:
+    fails.append("按 Esc 應該把釘住面板收起來")
+print("釘住當日明細：點開／再點收起／× 關閉／Esc 關閉／點別天換那天／"
+      "切區間後落在視窗外就收起（釘的是日期不是索引）")
 
 # ---------- 區間與標的記憶 ----------
 if not saved or '"win"' not in saved or '"stock"' not in saved:

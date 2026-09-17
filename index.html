@@ -60,7 +60,14 @@
 
 <section class="stats" id="stats"></section>
 
-<div id="chart" class="chart"></div>
+<div class="chart-wrap">
+  <div id="chart" class="chart"></div>
+  <!-- 點 K 線釘住的當日明細。內容和 hover 的 tooltip 是同一份 HTML。 -->
+  <div id="pinned" class="pinned" hidden>
+    <button type="button" class="pin-close" id="pinClose" aria-label="關閉當日明細">×</button>
+    <div id="pinnedBody"></div>
+  </div>
+</div>
 
 <section class="table-wrap">
   <h2>逐日明細 <span class="h2-note">最新的在最上面</span></h2>
