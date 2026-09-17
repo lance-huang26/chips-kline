@@ -7,7 +7,7 @@
     讀出畫面上的表格與 setOption 內容，
  3. 兩邊逐格比對。
 """
-import csv, json, os, re, sys
+import csv, json, math, os, re, statistics, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -32,6 +32,73 @@ def score(c, thr):
 exp = {}
 for thr in (-83000, -80000):
     exp[thr] = [score(c, thr) for c in chips]
+
+
+# ---------- 1c. Python 端獨立重算三種計分模式 ----------
+# 這裡刻意用和 app.js 不同的寫法（不共用任何程式碼），才驗得出東西。
+KEYS = ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]
+ZERO_CENTERED = {"top10_trader", "top10_specific", "dealer_opt"}
+
+
+def _median(a):
+    b = sorted(a)
+    n = len(b)
+    if not n:
+        return 0.0
+    return float(b[n // 2]) if n % 2 else (b[n // 2 - 1] + b[n // 2]) / 2.0
+
+
+def _mad(a, center=None):
+    c = _median(a) if center is None else center
+    s = 1.4826 * _median([abs(v - c) for v in a])
+    if s > 0:
+        return s
+    m = sum(abs(v - c) for v in a) / (len(a) or 1)
+    return m if m > 0 else 0.0
+
+
+def _curve(u, name, k):
+    if name == "clamp2":
+        return max(-1.0, min(1.0, u / 2.0)) * 0.5
+    if name == "clamp3":
+        return max(-1.0, min(1.0, u / 3.0)) * 0.5
+    return math.tanh(u / k) * 0.5
+
+
+def score_modes(series, mode, thr, window, curve_name, curve_k):
+    """series 是 [{key: value}] 的全部歷史；回傳每天的 total（算不出來給 None）。"""
+    out = []
+    for i, row in enumerate(series):
+        votes, ok = [], True
+        for key in KEYS:
+            x = row[key]
+            if x is None:
+                ok = False
+                break
+            if mode == "level":
+                votes.append(1 if x > (thr if key == "foreign_fut" else 0) else -1)
+                continue
+            if i == 0:
+                ok = False
+                break
+            d = x - series[i - 1][key]
+            if mode == "flow":
+                votes.append(1 if d > 0 else -1)
+                continue
+            if i < window + 1:
+                ok = False
+                break
+            lw = [series[g][key] for g in range(i - window, i)]
+            dw = [series[g][key] - series[g - 1][key] for g in range(i - window, i)]
+            center = 0 if key in ZERO_CENTERED else _median(lw)
+            s_lv, s_fl = _mad(lw), _mad(dw, 0)
+            if not (s_lv > 0 and s_fl > 0):
+                ok = False
+                break
+            votes.append(_curve((x - center) / s_lv, curve_name, curve_k)
+                         + _curve(d / s_fl, curve_name, curve_k))
+        out.append(sum(votes) if ok else None)
+    return out
 
 diff_days = [chips[i]["date"] for i in range(len(chips))
              if exp[-83000][i][3] != exp[-80000][i][3]]
@@ -242,6 +309,30 @@ with sync_playwright() as pw:
                        const out = {};
                        o.series.forEach(s => { if (s.name) out[s.name] = s.data; });
                        return out; }""")
+    # ---------- 三種計分模式 ----------
+    # 在補齊近月欄位的那份副本上做，口徑固定成「所有契約」，
+    # 這樣 Python 端可以直接用 chips.csv 的原始欄位重算。
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#scopeSeg button')]
+                            .find(x => x.dataset.scope === 'all'); if (b) b.click(); }""")
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
+    set_thr(-83000)
+    mode_series, mode_thr_disabled = {}, {}
+    for _m in ("level", "flow", "blend"):
+        pg.evaluate("""(k) => { const b = [...document.querySelectorAll('#modeSeg button')]
+                                .find(x => x.dataset.mode === k); if (b) b.click(); }""", _m)
+        pg.wait_for_timeout(150)
+        mode_series[_m] = pg.evaluate(
+            """() => { const o = window.__OPTS__[window.__OPTS__.length-1];
+                       const s = o.series.find(x => x.name === '五票總分');
+                       return s ? s.data : null; }""")
+        mode_thr_disabled[_m] = pg.eval_on_selector("#thrNum", "e => e.disabled")
+    mode_table_blend = read_table()
+    mode_note_blend = pg.eval_on_selector("#modeNote", "e => e.textContent")
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#modeSeg button')]
+                            .find(x => x.dataset.mode === 'level'); if (b) b.click(); }""")
+    pg.wait_for_timeout(120)
+
     # ---------- 區間與標的要記得住 ----------
     # 在補齊後的那份副本上做（同一個 file:// 目錄 = 同一個 origin）。
     # 重點是「重新整理之後還在」，所以一定要真的 reload，不能只看變數。
@@ -629,6 +720,76 @@ if scope_series["all"].get("五票總分") == scope_series["front"].get("五票�
     fails.append("兩種口徑算出完全一樣的總分——這組測試資料是故意反號的，不可能相同，"
                  "切換多半沒有真的生效")
 print("口徑切換：未補齊時「近月」鎖住；補齊後可切，數列、序列名稱與五票總分都跟著換")
+
+# ---------- 三種計分模式 ----------
+_W = prices.get("scoreWindow", 20)
+_CV = prices.get("scoreCurve", "tanh")
+_CK = prices.get("scoreCurveK", 2.5)
+_series = [{k: c[k] for k in KEYS} for c in chips]      # 口徑 = 所有契約
+for _m, _label in (("level", "剩餘口數"), ("flow", "今日操作"), ("blend", "加權")):
+    want = score_modes(_series, _m, -83000, _W, _CV, _CK)
+    got = mode_series.get(_m)
+    if got is None:
+        fails.append("%s 模式找不到五票總分序列" % _label)
+        continue
+    if len(got) != len(want):
+        fails.append("%s 模式的序列長度 %s != 歷史天數 %s" % (_label, len(got), len(want)))
+        continue
+    for i, (a, b2) in enumerate(zip(got, want)):
+        if (a is None) != (b2 is None):
+            fails.append("%s 模式 %s：一邊算得出來一邊算不出來（畫面 %r vs Python %r）"
+                         % (_label, chips[i]["date"], a, b2))
+            break
+        if a is not None and abs(a - b2) > 1e-9:
+            fails.append("%s 模式 %s：總分 %r != Python 重算的 %r"
+                         % (_label, chips[i]["date"], a, b2))
+            break
+
+# 暖身：模式 1 每天都有分數；模式 2 少第一天；模式 3 少前 window+1 天
+_n = len(chips)
+_have = {m: sum(1 for v in (mode_series[m] or []) if v is not None) for m in mode_series}
+if _have.get("level") != _n:
+    fails.append("剩餘口數模式應該每天都算得出來（%d 天），實得 %s" % (_n, _have.get("level")))
+if _have.get("flow") != _n - 1:
+    fails.append("今日操作模式應該少第一天（%d 天），實得 %s" % (_n - 1, _have.get("flow")))
+if _have.get("blend") != _n - _W - 1:
+    fails.append("加權模式暖身 %d 天，應該剩 %d 天，實得 %s"
+                 % (_W + 1, _n - _W - 1, _have.get("blend")))
+
+# 門檻只在模式 1 有效，其他模式要停用（不然會以為調了有用）
+if mode_thr_disabled.get("level"):
+    fails.append("剩餘口數模式下門檻不該被停用")
+if not mode_thr_disabled.get("flow") or not mode_thr_disabled.get("blend"):
+    fails.append("今日操作／加權模式下門檻應該停用，實得 %s" % mode_thr_disabled)
+
+# 加權模式的重點：曲線設定要真的生效。把同一份資料用 clamp2 再算一次，
+# 兩者必須不同——如果一樣，代表 config 的 scoreCurve 沒被讀到，或被寫死成 clamp。
+_blend = [v for v in (mode_series.get("blend") or []) if v is not None]
+if not _blend:
+    print("  [略過] 這份歷史只有 %d 天，暖身 %d 天之後沒有可比的加權分數；"
+          "曲線相關的斷言在天數足夠的 repo 上才會執行" % (_n, _W + 1))
+else:
+    _alt = [v for v in score_modes(_series, "blend", -83000, _W, "clamp2", _CK) if v is not None]
+    if _alt == _blend:
+        fails.append("加權模式用 clamp2 重算得到完全一樣的結果——scoreCurve 設定多半沒生效")
+    # tanh 不封頂：任何一天的單欄分數都不該正好是 ±0.5（那是 clamp 的特徵）
+    _hit = [v for v in _blend if abs(abs(v) - 5.0) < 1e-9]
+    if _hit:
+        fails.append("加權模式出現總分正好 ±5 的日子——tanh 不可能達到，曲線設定有問題")
+    # 表格要顯示小數票，而且暖身不足的日子是 —
+    _flat = " ".join(" ".join(r) for r in mode_table_blend)
+    if not re.search(r"[+-]0\.\d\d", _flat):
+        fails.append("加權模式的表格應該出現小數分數（例如 +0.43），實得前兩列：%s"
+                     % mode_table_blend[:2])
+    if "—" not in _flat:
+        fails.append("加權模式的表格應該有暖身不足的 — 列")
+if "tanh" not in mode_note_blend and "封頂" not in mode_note_blend:
+    fails.append("加權模式的說明應該講清楚用的是哪條曲線，實得：%r" % mode_note_blend[:80])
+print("三種計分模式：%d 天逐日與 Python 獨立重算一致（剩餘口數 %d／今日操作 %d／加權 %d 天有分數）"
+      % (_n, _have.get("level", 0), _have.get("flow", 0), _have.get("blend", 0)))
+if _blend:
+    print("  加權模式：%d 天有分數，範圍 %+.2f ~ %+.2f，且與 clamp2 重算的結果不同"
+          % (len(_blend), min(_blend), max(_blend)))
 
 # ---------- 區間與標的記憶 ----------
 if not saved or '"win"' not in saved or '"stock"' not in saved:

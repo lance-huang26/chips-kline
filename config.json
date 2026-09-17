@@ -41,5 +41,9 @@
     0
   ],
   "settlementOverrides": {},
-  "defaultLargeScope": "front"
+  "defaultLargeScope": "front",
+  "defaultScoreMode": "level",
+  "scoreWindow": 20,
+  "scoreCurve": "tanh",
+  "scoreCurveK": 2.5
 }

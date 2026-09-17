@@ -41,6 +41,7 @@
     compare: false,
     threshold: DEFAULT_THRESHOLD,
     scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
+    mode: 'level',         // 計分模式：'level' 剩餘口數 / 'flow' 今日操作 / 'blend' 加權
     shown: {},             // key -> bool
     bias: {}               // code -> { date: {ma, bias} }
   };
@@ -56,6 +57,17 @@
     });
   }
   function sign(n) { return (n > 0 ? '+' : '') + n; }
+  // 模式 1、2 的票是整數（+1 / -1），模式 3 是連續值（+0.43）。
+  // 統一從這裡出去，免得有的地方顯示 0.4299999999999999。
+  function fmtScore(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    var r = Math.round(v * 100) / 100;
+    return (r > 0 ? '+' : (r === 0 ? '' : '')) + (Number.isInteger(r) ? r : r.toFixed(2));
+  }
+  function modeLabel() {
+    for (var i = 0; i < MODES.length; i++) if (MODES[i].key === S.mode) return MODES[i].label;
+    return S.mode;
+  }
 
   // 本日操作＝今日未平倉／淨口數 減 昨日。
   // 比較的對象是「歷史上的前一個交易日」而不是「視窗裡的前一列」，
@@ -151,24 +163,106 @@
   }
 
   // ---------------------------------------------------------------- 計分
-  // 五張票：留多單 +1、留空單 -1
-  function scoreRow(chip, threshold) {
-    var v = [
-      chip.foreign_fut    > threshold ? 1 : -1,
-      chip.top10_trader   > 0 ? 1 : -1,
-      chip.top10_specific > 0 ? 1 : -1,
-      chip.foreign_opt    > 0 ? 1 : -1,
-      chip.dealer_opt     > 0 ? 1 : -1
-    ];
-    return {
-      votes: v,
-      fut: v[0] + v[1] + v[2],     // 期貨小計
-      opt: v[3] + v[4],            // 選擇權小計
-      total: v[0] + v[1] + v[2] + v[3] + v[4]
-    };
+  /* 三種計分模式，分數尺度一致：每欄 -1 ~ +1、總分 -5 ~ +5。
+   * 尺度相同是刻意的——圖表的軸、背景色塊、統計卡都不必因為換模式而改。
+   *
+   *   level  水位：看剩餘口數的正負（原本的算法）
+   *   flow   操作：看今日操作（今日 − 昨日）的正負
+   *   blend  權重：每欄拆成水位 0.5 + 操作 0.5
+   */
+  var MODES = [
+    { key: 'level', label: '剩餘口數', note: '五張票各看剩餘口數的正負，±1。' },
+    { key: 'flow',  label: '今日操作', note: '五張票各看今日操作（今日 − 昨日）的正負，±1。' },
+    { key: 'blend', label: '加權',     note: '每欄拆成水位 0.5 ＋ 操作 0.5，分數連續。' }
+  ];
+
+  /* 模式 3 的算法（用 2026/05~09 的實際資料調出來的，理由見 README）：
+   *
+   *   u    = (今天的值 − 中性點) ÷ 窗內穩健標準差      ← 「是平常波動的幾倍」
+   *   水位分 = curve(u) × 0.5
+   *   操作分 = curve(今日變動 ÷ 變動的穩健標準差) × 0.5
+   *
+   * 中性點分欄設定，這是關鍵：外資期貨在 87 天裡「一天都沒有正過」
+   * （平均 -75,407），選擇權外資也只有 5%。對這兩欄用 0 當中性點的話，
+   * 水位分會永遠卡在 -0.41 ~ -0.50，標準差只有 0.026——那是常數不是分數，
+   * 那一票等於完全失效。所以它們改用窗內中位數當中性點。
+   *
+   * 尺度用 MAD×1.4826 而不是標準差：籌碼資料有厚尾，而且結算換月會跳空，
+   * 一天的極端值就會把標準差拉大、讓之後 N 天的分數全部縮水。
+   */
+  var SCORE_WINDOW = 20;
+  var SCORE_CURVE = 'tanh';    // 'tanh' | 'clamp2' | 'clamp3'
+  var CURVE_K = 2.5;           // tanh 的緩和係數
+  // 中性點用 0 的欄位＝實際上會繞著 0 擺動的（>0 的天數約 48%~63%）。
+  // 沒列在這裡的用窗內中位數。
+  var ZERO_CENTERED = { top10_trader: 1, top10_specific: 1, dealer_opt: 1 };
+
+  function curve(u) {
+    if (!isFinite(u)) return 0;
+    if (SCORE_CURVE === 'clamp2') return Math.max(-1, Math.min(1, u / 2)) * 0.5;
+    if (SCORE_CURVE === 'clamp3') return Math.max(-1, Math.min(1, u / 3)) * 0.5;
+    return Math.tanh(u / CURVE_K) * 0.5;      // 不封頂：4.5 倍和 3.3 倍仍分得出來
+  }
+  function median(a) {
+    var b = a.slice().sort(function (x, y) { return x - y; }), n = b.length;
+    if (!n) return 0;
+    return n % 2 ? b[(n - 1) / 2] : (b[n / 2 - 1] + b[n / 2]) / 2;
+  }
+  function madSigma(a, center) {
+    var c = (center === undefined) ? median(a) : center;
+    var s = 1.4826 * median(a.map(function (v) { return Math.abs(v - c); }));
+    if (s > 0) return s;
+    // 窗內超過一半的值相同時 MAD 會是 0，退回平均絕對差；再不行就放棄這一天
+    var m = a.reduce(function (t, v) { return t + Math.abs(v - c); }, 0) / (a.length || 1);
+    return m > 0 ? m : 0;
+  }
+
+  // 對整個歷史算分（模式 2、3 需要更早的資料當暖身，不能只看視窗內）
+  function scoreHistory(threshold) {
+    var n = S.allChips.length, out = new Array(n), i, j, f;
+    var W = SCORE_WINDOW;
+
+    for (i = 0; i < n; i++) {
+      var c = S.allChips[i], v = [], ok = true;
+
+      for (j = 0; j < CHIP_FIELDS.length; j++) {
+        f = CHIP_FIELDS[j];
+        var x = c[f.key];
+        if (x === null || x === undefined) { ok = false; break; }
+
+        if (S.mode === 'level') {
+          v.push(x > (f.key === 'foreign_fut' ? threshold : 0) ? 1 : -1);
+          continue;
+        }
+        if (i === 0) { ok = false; break; }          // 沒有前一日就沒有「今日操作」
+        var d = x - S.allChips[i - 1][f.key];
+
+        if (S.mode === 'flow') { v.push(d > 0 ? 1 : -1); continue; }
+
+        // --- 模式 3 ---
+        if (i < W + 1) { ok = false; break; }        // 暖身不足
+        var lw = [], dw = [], g;
+        for (g = i - W; g < i; g++) {
+          lw.push(S.allChips[g][f.key]);
+          dw.push(S.allChips[g][f.key] - S.allChips[g - 1][f.key]);
+        }
+        var center = ZERO_CENTERED[f.key] ? 0 : median(lw);
+        var sLv = madSigma(lw), sFl = madSigma(dw, 0);
+        if (!(sLv > 0) || !(sFl > 0)) { ok = false; break; }
+        v.push(curve((x - center) / sLv) + curve(d / sFl));
+      }
+
+      out[i] = ok ? {
+        votes: v,
+        fut: v[0] + v[1] + v[2],
+        opt: v[3] + v[4],
+        total: v[0] + v[1] + v[2] + v[3] + v[4]
+      } : null;
+    }
+    return out;
   }
   function scoreAll(threshold) {
-    return S.chips.map(function (c) { return scoreRow(c, threshold); });
+    return scoreHistory(threshold).slice(S.startIdx);
   }
 
   // 取一個「好看的」刻度間距：1/1.5/2/2.5/3/4/5/6/8 ×10^k 之中，>= x 的最小值
@@ -375,6 +469,47 @@
       seg.appendChild(b);
     });
 
+    var modeSeg = el('modeSeg'), modeNote = el('modeNote');
+    modeSeg.innerHTML = '';
+    MODES.forEach(function (m) {
+      var b = document.createElement('button');
+      b.textContent = m.label;
+      b.dataset.mode = m.key;
+      b.className = (S.mode === m.key) ? 'on' : '';
+      b.onclick = function () {
+        S.mode = m.key;
+        Array.prototype.forEach.call(modeSeg.children, function (c) {
+          c.className = (c.dataset.mode === S.mode) ? 'on' : '';
+        });
+        showModeNote();
+        render();
+      };
+      modeSeg.appendChild(b);
+    });
+    function showModeNote() {
+      var m = MODES.filter(function (x) { return x.key === S.mode; })[0];
+      var txt = m.note;
+      if (S.mode === 'blend') {
+        txt += ' 水位分與操作分都先除以該欄近 ' + SCORE_WINDOW +
+               ' 日的穩健標準差（MAD×1.4826），再經 ' +
+               (SCORE_CURVE === 'tanh' ? 'tanh（不封頂，越極端加分越少）'
+                                       : SCORE_CURVE.replace('clamp', '') + 'σ 封頂') +
+               ' 換成分數。外資期貨與選擇權外資幾乎不會由負翻正，中性點改用窗內中位數；' +
+               '其餘三欄用 0。前 ' + (SCORE_WINDOW + 1) + ' 天暖身不足，顯示 —。';
+      }
+      // 門檻只有模式 1 會用到，其他模式直接把整塊停用，免得以為調了有效
+      var off = (S.mode !== 'level');
+      var blk = el('thrBlock');
+      if (blk) {
+        blk.style.opacity = off ? '0.45' : '';
+        Array.prototype.forEach.call(blk.querySelectorAll('input,button'), function (c) {
+          c.disabled = off;
+        });
+      }
+      modeNote.innerHTML = txt;
+    }
+    showModeNote();
+
     var scopeSeg = el('scopeSeg'), scopeNote = el('scopeNote'), ready = frontReady();
     scopeSeg.innerHTML = '';
     SCOPES.forEach(function (sp) {
@@ -452,13 +587,19 @@
 
   // ---------------------------------------------------------------- 統計條 / 門檻比較
   function renderStats(sc) {
+    // 算不出來的日子（模式 2 的第一天、模式 3 暖身不足）一律不計入統計，
+    // 不能當成 0——0 是「多空剛好抵銷」，和「算不出來」是兩件事。
+    var have = sc.filter(function (s) { return s; });
     var pos = 0, neg = 0, zero = 0;
-    sc.forEach(function (s) { if (s.total > 0) pos++; else if (s.total < 0) neg++; else zero++; });
+    have.forEach(function (s) { if (s.total > 0) pos++; else if (s.total < 0) neg++; else zero++; });
 
     var p0 = THRESHOLD_PRESETS[0], p1 = THRESHOLD_PRESETS[1];
-    var a = scoreAll(p0), b = scoreAll(p1), diff = [];
-    for (var i = 0; i < a.length; i++) {
-      if (a[i].total !== b[i].total) diff.push(S.dates[i]);
+    var diff = [];
+    if (S.mode === 'level') {          // 門檻只影響第 1 票，其他模式根本用不到
+      var a = scoreAll(p0), b = scoreAll(p1);
+      for (var i = 0; i < a.length; i++) {
+        if (a[i] && b[i] && a[i].total !== b[i].total) diff.push(S.dates[i]);
+      }
     }
 
     var st = stockByCode(S.primary);
@@ -468,17 +609,29 @@
       ? (rows[rows.length - 1].close / rows[0].close - 1) * 100 : null;
 
     el('stats').innerHTML = [
-      card('總分 > 0 天數', pos + '<small>/ ' + sc.length + '</small>', pos ? 'pos' : ''),
-      card('總分 < 0 天數', neg + '<small>/ ' + sc.length + '</small>', neg ? 'neg' : ''),
+      card('總分 > 0 天數', pos + '<small>/ ' + have.length + '</small>', pos ? 'pos' : ''),
+      card('總分 < 0 天數', neg + '<small>/ ' + have.length + '</small>', neg ? 'neg' : ''),
       card('總分 = 0 天數', String(zero), ''),
-      card('平均總分', (sc.reduce(function (t, s) { return t + s.total; }, 0) / sc.length).toFixed(2),
-           cls(sc.reduce(function (t, s) { return t + s.total; }, 0))),
+      card('平均總分',
+           have.length ? (have.reduce(function (t, s) { return t + s.total; }, 0) / have.length).toFixed(2) : '—',
+           have.length ? cls(have.reduce(function (t, s) { return t + s.total; }, 0)) : ''),
       card(st.code + ' ' + st.name + ' 區間報酬',
            (ret === null ? '—' : (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%'),
            ret === null ? '' : cls(ret)),
-      card('門檻 ' + fmt(p0) + ' vs ' + fmt(p1), diff.length + '<small> 天不同</small>', '')
+      (S.mode === 'level'
+        ? card('門檻 ' + fmt(p0) + ' vs ' + fmt(p1), diff.length + '<small> 天不同</small>', '')
+        : card('可計分天數', have.length + '<small>/ ' + sc.length + '</small>',
+               have.length === sc.length ? '' : 'pending'))
     ].join('');
 
+    if (S.mode !== 'level') {
+      el('thrNote').innerHTML =
+        '目前是「' + modeLabel() + '」模式，<b>門檻只影響「剩餘口數」模式的第 1 票</b>，這裡不會用到。' +
+        (have.length < sc.length
+          ? ' 另外有 <b>' + (sc.length - have.length) + '</b> 天因為暖身不足算不出分數，顯示為 —。'
+          : '');
+      return;
+    }
     var few = diff.length <= 12;
     el('thrNote').innerHTML = diff.length
       ? '目前 <b>' + fmt(p0) + '</b> 與 <b>' + fmt(p1) + '</b> 兩個門檻，總分不同的有 <b>' +
@@ -535,7 +688,8 @@
     //     做不出「剛好一整格」的區塊，所以背景改用兩支滿格 bar（上下各半）來畫。
     var bgUp = [], bgDn = [];
     sc.forEach(function (s) {
-      var col = s.total > 0 ? UP_SOFT : (s.total < 0 ? DOWN_SOFT : 'transparent');
+      var col = !s ? 'transparent'
+              : (s.total > 0 ? UP_SOFT : (s.total < 0 ? DOWN_SOFT : 'transparent'));
       bgUp.push({ value: 5, itemStyle: { color: col } });
       bgDn.push({ value: -5, itemStyle: { color: col } });
     });
@@ -564,12 +718,14 @@
 
     var scoreSeries = {
       name: '五票總分',
-      type: 'line', step: 'middle',
+      // 模式 1、2 的總分是整數、階梯線才對；模式 3 是連續值，階梯會看起來很怪
+      type: 'line', step: (S.mode === 'blend' ? false : 'middle'),
       xAxisIndex: 0, yAxisIndex: 1,
-      data: sc.map(function (s) { return s.total; }),
-      symbol: 'circle', symbolSize: 8, showSymbol: true,
+      data: sc.map(function (s) { return s ? s.total : null; }),
+      symbol: 'circle', symbolSize: S.mode === 'blend' ? 5 : 8, showSymbol: true,
       lineStyle: { width: 2, color: SCORE_COLOR },
       itemStyle: { color: SCORE_COLOR, borderColor: '#fcfcfb', borderWidth: 2 },
+      connectNulls: false,          // 暖身不足的那段要斷開，不要連成一條假線
       z: 6,
       markLine: { silent: true, symbol: 'none', data: mlData, animation: false }
     };
@@ -760,35 +916,41 @@
          '<td style="padding:0 8px 2px 0;text-align:right">本日操作</td>' +
          '<td style="padding:0 0 2px;text-align:right">票</td></tr>';
     CHIP_FIELDS.forEach(function (f, i) {
-      var v = s.votes[i], dd = dayDelta(idx, f.key);
+      var v = s ? s.votes[i] : null, dd = dayDelta(idx, f.key);
       h += '<tr>' +
         '<td style="padding:1px 8px 1px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
           f.color + ';margin-right:6px"></span>' + f.label + '</td>' +
         '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums">' + fmt(c[f.key]) + '</td>' +
         '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;color:' +
           (dd === null ? '#a09e97' : dd > 0 ? UP : dd < 0 ? DOWN : '#52514e') + '">' + fmtDelta(dd) + '</td>' +
-        '<td style="padding:1px 0;text-align:right;font-weight:600;color:' + (v > 0 ? UP : DOWN) + '">' + sign(v) + '</td>' +
+        '<td style="padding:1px 0;text-align:right;font-weight:600;color:' +
+          (v === null ? '#a09e97' : v > 0 ? UP : v < 0 ? DOWN : '#52514e') + '">' + fmtScore(v) + '</td>' +
         '</tr>';
     });
     h += '</table></div>';
 
     // 小計
     h += '<div style="padding:5px 11px 9px;border-top:1px solid #ececE8;font-size:11.5px;display:flex;gap:14px">' +
-      kv('期貨小計', s.fut) + kv('選擇權小計', s.opt) +
+      kv('期貨小計', s ? s.fut : null) + kv('選擇權小計', s ? s.opt : null) +
       '<span><span style="color:#807e78">總分</span> <b style="font-size:13px;color:' +
-        (s.total > 0 ? UP : s.total < 0 ? DOWN : '#0b0b0b') + '">' + sign(s.total) + '</b></span>' +
+        (!s ? '#a09e97' : s.total > 0 ? UP : s.total < 0 ? DOWN : '#0b0b0b') + '">' +
+        fmtScore(s ? s.total : null) + '</b></span>' +
       '</div>';
 
-    h += '<div style="padding:0 11px 8px;font-size:10.5px;color:#a09e97">第 1 票門檻：' +
-         fmt(S.threshold) + ' 口</div>';
+    h += '<div style="padding:0 11px 8px;font-size:10.5px;color:#a09e97">計分模式：' + modeLabel() +
+         (S.mode === 'level' ? '（第 1 票門檻 ' + fmt(S.threshold) + ' 口）'
+                             : (s ? '' : '（暖身不足，這天算不出分數）')) + '</div>';
     return h;
   }
   function tdKV(k, v) {
     return '<td style="padding:0 10px 0 0"><span style="color:#807e78">' + k + '</span> ' + fmt(v, 2) + '</td>';
   }
   function kv(k, v) {
+    if (v === null || v === undefined) {
+      return '<span><span style="color:#807e78">' + k + '</span> <b style="color:#a09e97">—</b></span>';
+    }
     return '<span><span style="color:#807e78">' + k + '</span> <b style="color:' +
-      (v > 0 ? UP : v < 0 ? DOWN : '#0b0b0b') + '">' + sign(v) + '</b></span>';
+      (v > 0 ? UP : v < 0 ? DOWN : '#0b0b0b') + '">' + fmtScore(v) + '</b></span>';
   }
 
   // ---------------------------------------------------------------- 表格
@@ -833,15 +995,15 @@
                 fmtBias(bi.bias) + '</td>';
 
       CHIP_FIELDS.forEach(function (f, k) {
-        var v = s.votes[k], dd = dayDelta(i, f.key);
+        var v = s ? s.votes[k] : null, dd = dayDelta(i, f.key);
         body += '<td class="sep">' + fmt(c[f.key]) + '</td>' +
                 '<td class="delta ' + (dd === null ? '' : cls(dd)) + '">' + fmtDelta(dd) + '</td>' +
-                '<td class="vote ' + cls(v) + '">' + sign(v) + '</td>';
+                '<td class="vote ' + (v === null ? '' : cls(v)) + '">' + fmtScore(v) + '</td>';
       });
 
-      body += '<td class="sep ' + cls(s.fut) + '">' + sign(s.fut) + '</td>' +
-              '<td class="' + cls(s.opt) + '">' + sign(s.opt) + '</td>' +
-              '<td class="total ' + cls(s.total) + '">' + sign(s.total) + '</td></tr>';
+      body += '<td class="sep ' + (s ? cls(s.fut) : '') + '">' + fmtScore(s ? s.fut : null) + '</td>' +
+              '<td class="' + (s ? cls(s.opt) : '') + '">' + fmtScore(s ? s.opt : null) + '</td>' +
+              '<td class="total ' + (s ? cls(s.total) : '') + '">' + fmtScore(s ? s.total : null) + '</td></tr>';
     });
     tbody.innerHTML = body;
   }
@@ -881,6 +1043,13 @@
     if (site.windowOptions) WINDOW_OPTIONS = site.windowOptions;
     if (site.defaultWindow !== undefined) { DEFAULT_WINDOW = site.defaultWindow; S.win = DEFAULT_WINDOW; }
     if (site.defaultThreshold !== undefined) { DEFAULT_THRESHOLD = site.defaultThreshold; }
+    if (site.scoreWindow) SCORE_WINDOW = site.scoreWindow;
+    if (site.scoreCurve) SCORE_CURVE = site.scoreCurve;
+    if (site.scoreCurveK) CURVE_K = site.scoreCurveK;
+    if (site.defaultScoreMode &&
+        MODES.some(function (m) { return m.key === site.defaultScoreMode; })) {
+      S.mode = site.defaultScoreMode;
+    }
 
     // 上次選的區間與標的。存過的值可能已經不存在了（config 改過區間選項、
     // 移掉某檔股票），所以一律驗過才用，驗不過就當作沒存過、回到預設。
