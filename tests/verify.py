@@ -21,6 +21,22 @@ for c in chips:
         if k != "date":
             c[k] = None if c[k] == "" else int(c[k])
 
+with open(os.path.join(ROOT, "data", "site.json"), encoding="utf-8") as f:
+    prices = json.load(f)          # 現在前端只讀 site.json
+
+# 畫面預設用哪一種十大口徑，Python 端就要跟著用哪一種，不然比的是兩份不同的數字。
+FRONT_READY = bool(chips) and all(
+    c.get("top10_trader_front") is not None and c.get("top10_specific_front") is not None
+    for c in chips)
+PAGE_SCOPE = prices.get("defaultLargeScope", "all")
+if PAGE_SCOPE == "front" and FRONT_READY:
+    for c in chips:
+        c["top10_trader"] = c["top10_trader_front"]
+        c["top10_specific"] = c["top10_specific_front"]
+else:
+    PAGE_SCOPE = "all"
+
+
 def score(c, thr):
     v = [1 if c["foreign_fut"] > thr else -1,
          1 if c["top10_trader"] > 0 else -1,
@@ -104,9 +120,6 @@ diff_days = [chips[i]["date"] for i in range(len(chips))
              if exp[-83000][i][3] != exp[-80000][i][3]]
 print("Python 端：-83000 vs -80000 總分不同的天數 =", len(diff_days), diff_days)
 
-with open(os.path.join(ROOT, "data", "site.json"), encoding="utf-8") as f:
-    prices = json.load(f)          # 現在前端只讀 site.json
-
 # ---------- 1b. Python 端獨立算 MA 與乖離率 ----------
 MA_PERIOD = prices.get("maPeriod", 20)
 BIAS_ALERT = 15.0
@@ -167,6 +180,12 @@ with sync_playwright() as pw:
         pg.eval_on_selector("#thrNum",
             "(el,v)=>{el.value=v; el.dispatchEvent(new Event('input',{bubbles:true}));}", str(v))
         pg.wait_for_timeout(120)
+
+    # 主要比對要涵蓋全部歷史，所以先切到「全部」。
+    # （預設視窗是 60 天，歷史比 60 天長的時候表格只會有 60 列。）
+    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
+                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
+    pg.wait_for_timeout(150)
 
     results = {}
     for thr in (-83000, -80000):
@@ -410,14 +429,24 @@ def check_sub_axes(opt, thr, small_keys, tag):
     if abs(fl * nl - round(fl * nl)) > 1e-9:
         bad.append("%s 對齊線沒有落在格線上" % tag)
 
-    # 資料不能被切掉
-    if small_keys:
-        sv = [c[k] for c in chips for k in small_keys]
-        if yl["min"] > min(sv) or yl["max"] < max(sv):
-            bad.append("%s 左軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
-                       % (tag, yl["min"], yl["max"], min(sv), max(sv)))
-    fv = [c["foreign_fut"] for c in chips]
-    if yr["min"] > min(fv) or yr["max"] < max(fv):
+    # 資料不能被切掉。範圍要從「這張圖真正畫出來的序列」取——
+    # 拿整份歷史來比會誤判：視窗只顯示最近 N 天，軸本來就只需要涵蓋那一段。
+    def axis_vals(idx):
+        out = []
+        for ser in opt["series"]:
+            if ser.get("yAxisIndex") != idx or ser.get("type") != "line":
+                continue
+            if not ser.get("name") or ser["name"].startswith("__"):
+                continue
+            out += [v for v in ser.get("data", []) if v is not None]
+        return out
+
+    sv = axis_vals(2)
+    if sv and (yl["min"] > min(sv) or yl["max"] < max(sv)):
+        bad.append("%s 左軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
+                   % (tag, yl["min"], yl["max"], min(sv), max(sv)))
+    fv = axis_vals(3)
+    if fv and (yr["min"] > min(fv) or yr["max"] < max(fv)):
         bad.append("%s 右軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
                    % (tag, yr["min"], yr["max"], min(fv), max(fv)))
 
@@ -461,10 +490,15 @@ for thr in (-83000, -80000):
         want_close = "{:,.2f}".format(pr["close"])
         if row[1] != want_close:
             fails.append("thr=%s %s 收盤 %r != %r" % (thr, d, row[1], want_close))
-        want_pct = pr["change"] / (pr["close"] - pr["change"]) * 100
-        got_pct = float(row[2].replace("%", "").replace("+", ""))
-        if abs(got_pct - want_pct) > 0.011:
-            fails.append("thr=%s %s 漲跌幅 %r != %.2f%%" % (thr, d, row[2], want_pct))
+        # 第一個交易日沒有漲跌價（來源就沒給），畫面應該顯示 — 而不是 0%
+        if pr["change"] is None or (pr["close"] - pr["change"]) == 0:
+            if row[2] != "—":
+                fails.append("thr=%s %s 沒有漲跌價，應該顯示 —，實得 %r" % (thr, d, row[2]))
+        else:
+            want_pct = pr["change"] / (pr["close"] - pr["change"]) * 100
+            got_pct = float(row[2].replace("%", "").replace("+", ""))
+            if abs(got_pct - want_pct) > 0.011:
+                fails.append("thr=%s %s 漲跌幅 %r != %.2f%%" % (thr, d, row[2], want_pct))
         # MA 與乖離率（跟著目前選中的股票，預設 2330）
         want_ma, want_bias = exp_bias[prices["stocks"][0]["code"]][d]
         if want_ma is None:
@@ -574,9 +608,14 @@ for thr in (-83000, -80000):
 m = re.search(r"總分不同的有\s*(\d+)\s*天", thr_note)
 if not m or int(m.group(1)) != len(diff_days):
     fails.append("門檻比較說明的天數與 Python 算的不符：%r" % thr_note)
-for d in diff_days:
-    if d not in thr_note:
-        fails.append("門檻比較說明沒列出 %s" % d)
+# 日期太多時畫面刻意不逐一列出（改叫人看表格），只有 12 天以內才逐日比對
+if len(diff_days) <= 12:
+    for d in diff_days:
+        if d not in thr_note:
+            fails.append("門檻比較說明沒列出 %s" % d)
+elif "請看下方表格" not in thr_note:
+    fails.append("差異有 %d 天（超過 12），說明應該改成請看表格，實得：%r"
+                 % (len(diff_days), thr_note[:120]))
 
 if cmp_opt is None or not any(s.get("type") == "line" and s.get("yAxisIndex") == 0
                               for s in cmp_opt["series"]):
@@ -672,10 +711,14 @@ print("表單對比（深色系統主題）：",
 _labels = [x["label"] for x in scope_locked]
 if _labels != ["所有契約", "近月"]:
     fails.append("口徑切換的兩個選項不對：%s" % _labels)
-if not scope_locked[1]["disabled"]:
-    fails.append("歷史檔還沒有近月欄位時，「近月」必須是鎖住的（不然會拿 null 去投票）")
-if "backfill_large" not in scope_locked_note:
-    fails.append("鎖住時要說明怎麼補，實得：%r" % scope_locked_note)
+if FRONT_READY:
+    if scope_locked[1]["disabled"]:
+        fails.append("歷史檔已經有近月欄位了，「近月」不該還鎖著")
+else:
+    if not scope_locked[1]["disabled"]:
+        fails.append("歷史檔還沒有近月欄位時，「近月」必須是鎖住的（不然會拿 null 去投票）")
+    if "backfill_large" not in scope_locked_note:
+        fails.append("鎖住時要說明怎麼補，實得：%r" % scope_locked_note)
 
 if scope_ready[1]["disabled"]:
     fails.append("補齊近月欄位之後，「近月」不該還鎖著")
@@ -824,5 +867,6 @@ if fails:
     for f in fails[:40]:
         print("   -", f)
     sys.exit(1)
-print("✅ 全部通過：21 天 × 2 門檻 × 23 欄（含本日操作、MA20 與乖離率），表格 / tooltip / 圖表序列 / "
-      "背景色塊 / markLine / 副圖雙軸對齊 / 顏色與對比 皆與 Python 獨立計算一致")
+print("✅ 全部通過：%d 天 × 2 門檻 × 3 種計分模式（口徑 %s），表格 / tooltip / 圖表序列 / 背景色塊 / "
+      "markLine / 副圖雙軸對齊 / 顏色與對比 / 偏好記憶 皆與 Python 獨立計算一致"
+      % (len(chips), "近月" if PAGE_SCOPE == "front" else "所有契約"))
