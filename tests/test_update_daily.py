@@ -12,6 +12,7 @@
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -438,6 +439,21 @@ _txt = open(store.CHIPS_CSV, encoding="utf-8").read()
 check(_txt.splitlines()[-1].endswith(",,310,410"),
       "還沒補的那天，近月欄位應該是空字串而不是 0：%s" % _txt.splitlines()[-1])
 print("  回補近月欄位：舊檔讀得進來（缺的是 None 不是 0），patch 只動那兩欄")
+
+# 11) 排程的分鐘數不可以是 0。整點是 GitHub 最壅塞的一分鐘，
+#     而且本 repo 實測延遲四到五小時，靠的就是「撒一排、分鐘錯開」去命中想要的時段。
+#     這種意圖很容易在之後整理設定時被順手改回整點，所以釘住。
+_wf = os.path.join(ROOT, ".github", "workflows", "daily.yml")
+if os.path.exists(_wf):
+    _crons = re.findall(r'cron:\s*"([^"]+)"', open(_wf, encoding="utf-8").read())
+    check(len(_crons) >= 3, "排程至少要有 3 個 cron，實得 %d 個" % len(_crons))
+    _oclock = [c for c in _crons if c.split()[0] in ("0", "00")]
+    check(not _oclock, "這些 cron 落在整點：%s——整點最壅塞，分鐘數要錯開" % _oclock)
+    _dup = len(_crons) != len(set(_crons))
+    check(not _dup, "有重複的 cron：%s" % _crons)
+    for _c in _crons:
+        check(len(_c.split()) == 5, "cron 欄位數不對：%r" % _c)
+    print("  排程：%d 個 cron，分鐘數全部避開整點" % len(_crons))
 
 shutil.rmtree(work, ignore_errors=True)
 

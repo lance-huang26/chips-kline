@@ -3,3 +3,6 @@ __pycache__/
 .DS_Store
 
 .trash/
+
+# 從對話傳過來的暫存包，不要進 repo
+.fix*.tar.gz
