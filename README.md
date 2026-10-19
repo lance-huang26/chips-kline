@@ -11,6 +11,48 @@
 
 ECharts 由 CDN 載入（cdnjs，失敗自動改用 jsdelivr），所以開啟時需要網路。
 
+頁面分成兩個分頁：**籌碼 K 線**（本專案自己抓的資料）與**總經**（直接嵌 TradingView）。
+上次看的是哪一頁會記在 localStorage。
+
+## 總經分頁
+
+這一頁**不經過本專案的抓取流程**，是直接嵌入 TradingView 的免費 widget：
+
+| 項目 | 代號 |
+|---|---|
+| 美元兌台幣 | `FX_IDC:USDTWD` |
+| WTI 西德州原油 | `TVC:USOIL`（差價合約） |
+
+所以它沒有 GitHub Action、沒有歷史檔、沒有逐日明細，也算不出 MA20 與乖離率——
+那些都需要數字，而 widget 只給圖。換來的是即時報價和零維護。
+
+### 為什麼是這些選擇（都實測過）
+
+**想嵌的原始來源嵌不了。** 台銀和 Yahoo Finance 都用 CSP `frame-ancestors` 擋掉跨站嵌入：
+
+```
+Framing 'https://rate.bot.com.tw/' violates CSP directive: "frame-ancestors 'self'"
+Framing 'https://finance.yahoo.com/' violates CSP directive: "frame-ancestors 'self' ..."
+```
+
+這是對方明示的拒絕，不繞。TradingView 的 widget 則是設計來給第三方嵌的。
+
+**WTI 只能用差價合約。** `NYMEX:CL1!`（近月期貨）在免費 widget 會顯示
+「此商品僅在 TradingView 上可用」，拿不到。官方的 EIA 現貨價
+（FRED `DCOILWTICO`，無需 API key）可以抓，但會延遲 3~5 個交易日
+（實測 10/19 當天最新只到 10/14）。`TVC:USOIL` 和近月期貨的報價很接近
+（實測 96.98 對 97.09），看趨勢沒問題，但**不是可引用的官方結算價**。
+
+**顏色慣例和其他分頁相反。** TradingView 固定用美股慣例（漲綠跌紅），
+和本站的紅漲綠跌相反。`plotLineColorGrowing` / `plotLineColorFalling` 和
+Advanced Chart 的 `overrides`（`mainSeriesProperties.candleStyle.upColor` 那組）
+兩種都試過，**免費嵌入 widget 全部忽略**。所以頁面上直接標注這件事，
+而不是假裝沒有——看錯顏色比看不到圖更糟。
+
+**widget 延遲到切進分頁才載入。** 籌碼分頁用不到第三方 script，沒必要為它多拉一支；
+而且 widget 在隱藏容器裡會量到 0 高度、畫出來是空的。載不出來時（對方改版、
+停止提供、或網路不通）會顯示明確的錯誤框，不會留一塊不知道在幹嘛的空白。
+
 ## 資料從哪來
 
 籌碼欄位**全部來自期交所**，沒有手動步驟、沒有二手來源：
@@ -171,7 +213,7 @@ bot 每天會 commit 回 repo，所以你本機有未推的 commit 時 `git push
 ## 檔案
 
 ```
-index.html / app.js / style.css   前端（只讀 data/site.json）
+index.html / app.js / style.css   前端（籌碼頁只讀 data/site.json；總經頁嵌 TradingView）
 config.json                       股票清單、均線天數、門檻預設、區間選項
 taifex.py                         期交所籌碼抓取與解析（七欄、兩種十大口徑）
 taifut.py                         台指期近月日 K 抓取與解析

@@ -16,6 +16,15 @@
   <p class="sub pending" id="dataNote"></p>
 </header>
 
+<nav class="tabs" id="tabs" role="tablist" aria-label="頁面分頁">
+  <button type="button" role="tab" data-tab="chips" class="on"
+          id="tabBtnChips" aria-controls="tabChips" aria-selected="true">籌碼 K 線</button>
+  <button type="button" role="tab" data-tab="macro"
+          id="tabBtnMacro" aria-controls="tabMacro" aria-selected="false">總經</button>
+</nav>
+
+<div id="tabChips" role="tabpanel" aria-labelledby="tabBtnChips">
+
 <section class="controls" id="controls">
   <div class="ctl-block">
     <div class="ctl-label">顯示區間</div>
@@ -87,6 +96,37 @@
 </section>
 
 <div id="loadErr" class="err" hidden></div>
+</div><!-- /#tabChips -->
+
+<div id="tabMacro" role="tabpanel" aria-labelledby="tabBtnMacro" hidden>
+  <p class="macro-note">
+    <b>這一頁的圖表由 TradingView 提供</b>，是即時報價，不經過本專案的每日抓取流程，
+    所以沒有歷史檔、沒有逐日明細，也算不出 MA20 與乖離率。
+    <b class="warn">顏色慣例和其他分頁相反</b>：TradingView 固定用美股慣例（<b class="us-up">漲綠</b>、<b class="us-dn">跌紅</b>），
+    這個無法透過嵌入參數修改，已實測過。看這一頁時請特別注意。
+  </p>
+
+  <section class="macro-grid">
+    <div class="macro-card">
+      <h2>美元兌台幣 <span class="h2-note">USD/TWD・FX_IDC</span></h2>
+      <div class="tv-box" data-tv-symbol="FX_IDC:USDTWD" data-tv-title="美元兌台幣"></div>
+    </div>
+    <div class="macro-card">
+      <h2>WTI 西德州原油 <span class="h2-note">TVC:USOIL・差價合約</span></h2>
+      <div class="tv-box" data-tv-symbol="TVC:USOIL" data-tv-title="WTI 西德州原油"></div>
+    </div>
+  </section>
+
+  <p class="foot-note">
+    註：WTI 這張用的是 <code>TVC:USOIL</code>（TradingView 的 WTI 原油<b>差價合約</b>報價）。
+    免費的嵌入 widget 不提供 <code>NYMEX:CL1!</code> 近月期貨（會顯示「此商品僅在 TradingView 上可用」），
+    官方的 EIA 現貨價（FRED <code>DCOILWTICO</code>）則會延遲 3~5 個交易日。
+    差價合約和近月期貨的報價很接近，看趨勢沒問題，但<b>不是可引用的官方結算價</b>。
+    匯率那張是 <code>FX_IDC:USDTWD</code> 的即時中間價，和台銀牌告的即期買入／賣出會有小差距。
+  </p>
+
+  <div id="tvErr" class="err" hidden></div>
+</div><!-- /#tabMacro -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.6.0/echarts.min.js"></script>
 <script>

@@ -407,6 +407,39 @@ with sync_playwright() as pw:
                             .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
     pg.wait_for_timeout(120)
 
+    # ---------- 分頁切換 ----------
+    # TradingView 是第三方、而且離線測試環境連不到，所以這裡不驗它畫不畫得出圖，
+    # 只驗我們自己負責的部分：分頁切換、控制列收合、script 真的是延遲載入的、
+    # 以及切回來之後有重畫（ECharts 在隱藏容器裡會量到 0 寬）。
+    pg.route("**s3.tradingview.com**", lambda r: r.abort())
+
+    def tab_state():
+        return pg.evaluate("""() => ({
+            chips: !document.getElementById('tabChips').hidden,
+            macro: !document.getElementById('tabMacro').hidden,
+            controls: !document.getElementById('controls').hidden,
+            on: [...document.getElementById('tabs').children]
+                  .filter(b => b.className === 'on').map(b => b.dataset.tab),
+            selected: [...document.getElementById('tabs').children]
+                  .map(b => b.getAttribute('aria-selected')),
+            tvScripts: document.querySelectorAll('script[src*="tradingview"]').length,
+            tvBoxes: document.querySelectorAll('#tabMacro .tv-box').length
+          })""")
+
+    def click_tab(name):
+        pg.evaluate("(n) => { const b = [...document.getElementById('tabs').children]"
+                    ".find(x => x.dataset.tab === n); if (b) b.click(); }", name)
+        pg.wait_for_timeout(250)
+
+    tab_initial = tab_state()
+    click_tab('macro')
+    tab_macro = tab_state()
+    opts_before_back = pg.evaluate("() => window.__OPTS__.length")
+    click_tab('chips')
+    tab_back = tab_state()
+    opts_after_back = pg.evaluate("() => window.__OPTS__.length")
+    tab_rows_after_back = len(read_table())
+
     # ---------- 區間與標的要記得住 ----------
     # 在補齊後的那份副本上做（同一個 file:// 目錄 = 同一個 origin）。
     # 重點是「重新整理之後還在」，所以一定要真的 reload，不能只看變數。
@@ -888,6 +921,42 @@ print("三種計分模式：%d 天逐日與 Python 獨立重算一致（剩餘�
 if _blend:
     print("  加權模式：%d 天有分數，範圍 %+.2f ~ %+.2f，且與 clamp2 重算的結果不同"
           % (len(_blend), min(_blend), max(_blend)))
+
+# ---------- 分頁切換 ----------
+if not (tab_initial["chips"] and not tab_initial["macro"]):
+    fails.append("預設應該停在籌碼 K 線分頁，實得 %s" % tab_initial)
+if not tab_initial["controls"]:
+    fails.append("籌碼分頁時控制列應該是顯示的")
+if tab_initial["tvScripts"] != 0:
+    fails.append("還沒切到總經分頁就載了 TradingView 的 script（應該延遲載入），實得 %d 支"
+                 % tab_initial["tvScripts"])
+if tab_initial["on"] != ["chips"] or tab_initial["selected"] != ["true", "false"]:
+    fails.append("分頁按鈕的選中狀態不對：%s / %s"
+                 % (tab_initial["on"], tab_initial["selected"]))
+
+if not (tab_macro["macro"] and not tab_macro["chips"]):
+    fails.append("切到總經之後應該只顯示總經分頁，實得 %s" % tab_macro)
+if tab_macro["controls"]:
+    fails.append("總經分頁時控制列應該收起來（那些控制項對這一頁沒有作用）")
+if tab_macro["tvBoxes"] != 2:
+    fails.append("總經分頁應該有兩個圖表容器（匯率、原油），實得 %d" % tab_macro["tvBoxes"])
+if tab_macro["tvScripts"] != 2:
+    fails.append("切到總經之後應該為兩個容器各掛一支 widget script，實得 %d"
+                 % tab_macro["tvScripts"])
+if tab_macro["on"] != ["macro"] or tab_macro["selected"] != ["false", "true"]:
+    fails.append("切到總經後按鈕狀態不對：%s / %s"
+                 % (tab_macro["on"], tab_macro["selected"]))
+
+if not (tab_back["chips"] and not tab_back["macro"] and tab_back["controls"]):
+    fails.append("切回籌碼分頁之後狀態不對：%s" % tab_back)
+if opts_after_back <= opts_before_back:
+    fails.append("切回籌碼分頁時應該重畫一次（隱藏容器會讓 ECharts 量到 0 寬），"
+                 "但 setOption 沒有再被呼叫")
+if tab_rows_after_back == 0:
+    fails.append("切回籌碼分頁之後表格是空的")
+print("分頁切換：預設籌碼頁、TradingView script 延遲到切過去才載（2 支）、"
+      "總經頁收起控制列、切回來會重畫（setOption %d → %d 次）"
+      % (opts_before_back, opts_after_back))
 
 # ---------- 釘住當日明細 ----------
 if not pin_before["hidden"]:

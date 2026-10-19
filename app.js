@@ -42,6 +42,7 @@
     threshold: DEFAULT_THRESHOLD,
     scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
     mode: 'level',         // 計分模式：'level' 剩餘口數 / 'flow' 今日操作 / 'blend' 加權
+    tab: 'chips',          // 目前分頁：'chips' 籌碼 K 線 / 'macro' 總經
     pinned: null,          // 釘住的那天（存日期字串，不是索引——切區間索引會位移）
     pinAt: null,           // 釘住時點的位置 {x, y}，用來擺面板
     shown: {},             // key -> bool
@@ -109,6 +110,99 @@
       p[k] = v;
       localStorage.setItem(PREF_KEY, JSON.stringify(p));
     } catch (e) { /* 存不了就算了，不影響任何功能 */ }
+  }
+
+  /* 分頁切換。
+   *
+   * 兩個刻意的作法：
+   *
+   * 1. 控制列只屬於籌碼分頁。切到總經時要一起收起來，不然畫面上會有一排
+   *    調了也沒反應的控制項。
+   * 2. ECharts 在隱藏的容器裡量不到寬度，切回來時尺寸會變成 0 或殘留舊值，
+   *    所以切回籌碼分頁一定要 resize()。這個 bug 只有在「切走再切回來」
+   *    才會出現，第一次載入看不到。
+   */
+  var TV_SRC = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+  var tvLoaded = false;
+
+  function showTab(name) {
+    S.tab = name;
+    el('tabChips').hidden = (name !== 'chips');
+    el('tabMacro').hidden = (name !== 'macro');
+    el('controls').hidden = (name !== 'chips');
+    Array.prototype.forEach.call(el('tabs').children, function (b) {
+      var on = (b.dataset.tab === name);
+      b.className = on ? 'on' : '';
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    savePref('tab', name);
+    if (name === 'macro') mountTradingView();
+    else if (chart) { chart.resize(); render(); }   // 見上面第 2 點
+  }
+
+  /* TradingView 的 widget 到切進總經分頁才載入。
+   *
+   * 不在頁面載入時就掛，有兩個理由：籌碼分頁根本用不到，沒必要為它多拉一支
+   * 第三方 script；而且 widget 在隱藏的容器裡會量到 0 高度，畫出來是空的。
+   *
+   * 它是第三方服務，隨時可能改版或停掉，所以給一個逾時提示——不然使用者
+   * 只會看到一塊永遠空白的區域，不知道是在載入還是壞了。
+   */
+  function mountTradingView() {
+    if (tvLoaded) return;
+    tvLoaded = true;
+    var boxes = document.querySelectorAll('#tabMacro .tv-box');
+    Array.prototype.forEach.call(boxes, function (box) {
+      var hint = document.createElement('div');
+      hint.className = 'tv-loading';
+      hint.textContent = '載入 ' + box.dataset.tvTitle + ' 圖表中…';
+      box.appendChild(hint);
+
+      var container = document.createElement('div');
+      container.className = 'tradingview-widget-container';
+      container.style.height = '100%';
+      var inner = document.createElement('div');
+      inner.className = 'tradingview-widget-container__widget';
+      inner.style.height = '100%';
+      container.appendChild(inner);
+
+      var sc = document.createElement('script');
+      sc.type = 'text/javascript';
+      sc.async = true;
+      sc.src = TV_SRC;
+      sc.text = JSON.stringify({
+        symbol: box.dataset.tvSymbol,
+        interval: 'D',
+        timezone: 'Asia/Taipei',
+        theme: 'light',
+        style: '1',                  // 1 = K 棒
+        locale: 'zh_TW',
+        width: '100%',
+        height: 420,
+        hide_side_toolbar: true,
+        allow_symbol_change: false,
+        save_image: false,
+        withdateranges: true
+      });
+      container.appendChild(sc);
+      box.appendChild(container);
+
+      // widget 自己會塞一個 iframe 進來；有 iframe 就當作載到了
+      var t0 = Date.now();
+      var poll = setInterval(function () {
+        if (box.querySelector('iframe')) { clearInterval(poll); hint.remove(); return; }
+        if (Date.now() - t0 > 12000) {
+          clearInterval(poll);
+          hint.remove();
+          var box2 = el('tvErr');
+          box2.hidden = false;
+          box2.innerHTML = '<b>TradingView 的圖表沒有載入成功。</b>' +
+            '這一頁是直接嵌入 TradingView 的免費 widget（<code>' + TV_SRC + '</code>），' +
+            '所以需要網路，而且如果對方改版、停止提供或擋掉這個來源，這裡就會是空白。' +
+            '籌碼 K 線那一頁不受影響——它讀的是本專案自己的 <code>data/site.json</code>。';
+        }
+      }, 400);
+    });
   }
 
   /* 十大交易人的兩種口徑。
@@ -585,6 +679,10 @@
     setThr(DEFAULT_THRESHOLD, 'init');
 
     el('compareChk').onchange = function () { S.compare = this.checked; render(); };
+
+    Array.prototype.forEach.call(el('tabs').children, function (b) {
+      b.onclick = function () { showTab(b.dataset.tab); };
+    });
   }
 
   // ---------------------------------------------------------------- 統計條 / 門檻比較
@@ -1092,6 +1190,7 @@
     // 上次選的區間與標的。存過的值可能已經不存在了（config 改過區間選項、
     // 移掉某檔股票），所以一律驗過才用，驗不過就當作沒存過、回到預設。
     var pref = loadPrefs();
+    if (pref.tab === 'chips' || pref.tab === 'macro') S.tab = pref.tab;
     if (WINDOW_OPTIONS.indexOf(pref.win) >= 0) S.win = pref.win;
     if (site.stocks.some(function (s) { return s.code === pref.stock; })) {
       S.primary = pref.stock;
@@ -1127,6 +1226,9 @@
     });
 
     buildControls();   // 內含一次 render()
+    // render() 之後才切分頁：ECharts 要先在看得見的容器裡量過一次寬度，
+    // 否則一開始就停在總經分頁時，切回籌碼會是一張 0 寬的圖。
+    if (S.tab !== 'chips') showTab(S.tab);
   }
 
   function fail(msg) {
