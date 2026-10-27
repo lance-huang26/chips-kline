@@ -768,24 +768,36 @@ for idx, tip in zip([0, 5, 20], tips):
             fails.append("tooltip(第%d天) %s 的本日操作 %s 沒有緊接在口數後面" % (idx, f, want))
 print("tooltip：口數 → 本日操作 → 票 的順序與數值正確（第 1／6／21 天）")
 
-# tooltip 的乖離率區塊：三檔都要有，且 >15% 的要被標紅
+# tooltip 只放籌碼：票數要在最上面，個股的行情與乖離率不應該出現在這裡。
+# （那些在下方的逐日明細表格裡查得到；把六檔股票塞進這張卡片會把五票擠下去。）
 for idx, tip in zip([0, 5, 20], tips):
     d = chips[idx]["date"]
-    if "乖離率" not in tip:
-        fails.append("tooltip(第%d天) 沒有乖離率區塊" % idx)
-        continue
+    txt = _html.unescape(re.sub(r"<[^>]+>", "|", tip))
+
+    # 票數必須排在日期之後的第一個區塊
+    p_date = txt.find(d)
+    p_vote = txt.find("本日操作")
+    if p_date < 0:
+        fails.append("tooltip(%s) 沒有日期" % d)
+    elif not (0 <= p_date < p_vote):
+        fails.append("tooltip(%s) 票數區塊沒有排在最上面（日期 %d、票數 %d）"
+                     % (d, p_date, p_vote))
+
+    for word in ("乖離率", "MA%d" % MA_PERIOD):
+        if word in tip:
+            fails.append("tooltip(%s) 不該再出現「%s」——個股資訊已經移出 hover" % (d, word))
     for st in prices["stocks"]:
-        ma, bias = exp_bias[st["code"]].get(d, (None, None))
-        want = "—" if bias is None else "%s%.2f%%" % ("+" if bias > 0 else "", bias)
-        if want not in tip:
-            fails.append("tooltip(%s) 缺 %s 的乖離率 %s" % (d, st["code"], want))
-        if bias is not None and bias > BIAS_ALERT:
-            # 標紅 = 用漲色 #d93b30 且加粗
-            seg = tip[max(tip.find(want) - 260, 0): tip.find(want) + len(want) + 4]
-            if "d93b30" not in seg or "font-weight:700" not in seg:
-                fails.append("tooltip(%s) %s 乖離 %s 超過 %g%% 但沒有標紅"
-                             % (d, st["code"], want, BIAS_ALERT))
-print("tooltip：三檔乖離率皆列出，超過 %g%% 的有標紅" % BIAS_ALERT)
+        label = st["code"] + " " + st["name"]
+        if label in tip:
+            fails.append("tooltip(%s) 不該再出現個股 %s" % (d, label))
+
+    # 小計與總分仍要在，而且排在五票之後
+    for word in ("期貨小計", "選擇權小計", "總分", "計分模式"):
+        if word not in tip:
+            fails.append("tooltip(%s) 少了「%s」" % (d, word))
+    if txt.find("總分") < p_vote:
+        fails.append("tooltip(%s) 總分跑到五票前面了" % d)
+print("tooltip：只剩籌碼——票數緊接在日期之後，個股行情與乖離率已移除，小計/總分在最後")
 
 for scheme, items in contrast.items():
     for it in items:

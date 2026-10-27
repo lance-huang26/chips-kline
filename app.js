@@ -954,62 +954,21 @@
 
   function shortDate(d) { return d.slice(5); }
 
+  /* hover / 釘住時顯示的當日明細。
+   *
+   * 只放籌碼：五票、本日操作、小計、總分。
+   * 個股的 OHLC 與乖離率刻意不放——這張卡片是用來讀「今天籌碼怎麼投」的，
+   * 把六檔股票的行情混進來會把真正重要的那幾行擠到下面去。
+   * 個股那些數字在下方的逐日明細表格裡都查得到（收盤、漲跌幅、MA20、乖離率）。
+   */
   function tooltipHtml(idx, sc) {
     var d = S.dates[idx], c = S.chips[idx], s = sc[idx];
-    var st = stockByCode(S.primary);
-    var rows = alignedRows(st), r = rows[idx];
     var isSettle = SETTLEMENT.indexOf(d) >= 0;
 
     var h = '<div style="padding:9px 11px 4px;border-bottom:1px solid #ececE8">' +
             '<b style="font-size:12.5px">' + d + '</b>' +
             (isSettle ? '<span style="margin-left:7px;font-size:11px;color:#8a6d1f;background:#fdf3d8;padding:1px 5px;border-radius:3px">結算日</span>' : '') +
             '</div>';
-
-    // 價格
-    h += '<div style="padding:7px 11px;border-bottom:1px solid #ececE8">' +
-         '<div style="color:#807e78;font-size:11px;margin-bottom:3px">' + st.code + ' ' + st.name + '</div>';
-    if (r) {
-      var chg = (r.change === null || r.change === undefined) ? null : r.change;
-      var prev = (chg === null) ? null : r.close - chg;
-      var pct = (prev && prev !== 0) ? (chg / prev * 100) : null;
-      h += '<table style="font-size:11.5px;border-spacing:0"><tr>' +
-           tdKV('開', r.open) + tdKV('高', r.high) + tdKV('低', r.low) +
-           '<td style="padding:0 6px 0 0"><span style="color:#807e78">收</span> <b style="color:' +
-             (chg > 0 ? UP : chg < 0 ? DOWN : '#0b0b0b') + '">' + fmt(r.close, 2) + '</b></td>' +
-           '</tr></table>' +
-           (pct === null ? '' : '<div style="font-size:11.5px;color:' + (chg > 0 ? UP : chg < 0 ? DOWN : '#52514e') +
-             '">' + (chg > 0 ? '+' : '') + fmt(chg, 2) + '（' + (pct > 0 ? '+' : '') + pct.toFixed(2) + '%）</div>');
-    } else {
-      h += '<div style="font-size:11.5px;color:#807e78">當日無交易資料（K 棒留空）</div>';
-    }
-    h += '</div>';
-
-    // 三檔的乖離率（相對 MA20），正乖離超過門檻標紅
-    h += '<div style="padding:7px 11px;border-bottom:1px solid #ececE8">' +
-         '<div style="color:#807e78;font-size:11px;margin-bottom:3px">乖離率（MA' + MA_PERIOD +
-         '，>' + BIAS_ALERT + '% 標紅）</div>' +
-         '<table style="font-size:11.5px;border-spacing:0">' +
-         '<tr style="color:#a09e97;font-size:10.5px"><td></td>' +
-         '<td style="padding:0 8px 2px 0;text-align:right">收盤</td>' +
-         '<td style="padding:0 8px 2px 0;text-align:right">MA' + MA_PERIOD + '</td>' +
-         '<td style="padding:0 0 2px;text-align:right">乖離率</td></tr>';
-    S.prices.stocks.forEach(function (s2) {
-      var r2 = alignedRows(s2)[idx];
-      var bi = biasAt(s2.code, d);
-      var hot = bi.bias !== null && bi.bias > BIAS_ALERT;
-      h += '<tr' + (s2.code === S.primary ? ' style="font-weight:600"' : '') + '>' +
-        '<td style="padding:1px 8px 1px 0">' + s2.code + ' ' + s2.name + '</td>' +
-        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums">' +
-          (r2 ? fmt(r2.close, 2) : '—') + '</td>' +
-        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;color:#807e78">' +
-          (bi.ma === null ? '—' : fmt(bi.ma, 2)) + '</td>' +
-        '<td style="padding:1px 0;text-align:right;font-variant-numeric:tabular-nums;' +
-          (hot ? 'color:' + UP + ';font-weight:700'
-               : 'color:' + (bi.bias === null ? '#a09e97' : bi.bias < 0 ? DOWN : '#52514e')) + '">' +
-          fmtBias(bi.bias) + (hot ? ' ▲' : '') + '</td>' +
-        '</tr>';
-    });
-    h += '</table></div>';
 
     // 五票
     h += '<div style="padding:7px 11px 3px"><table style="font-size:11.5px;border-spacing:0">';
@@ -1043,9 +1002,6 @@
          (S.mode === 'level' ? '（第 1 票門檻 ' + fmt(S.threshold) + ' 口）'
                              : (s ? '' : '（暖身不足，這天算不出分數）')) + '</div>';
     return h;
-  }
-  function tdKV(k, v) {
-    return '<td style="padding:0 10px 0 0"><span style="color:#807e78">' + k + '</span> ' + fmt(v, 2) + '</td>';
   }
   function kv(k, v) {
     if (v === null || v === undefined) {
