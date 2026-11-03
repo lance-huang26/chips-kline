@@ -167,6 +167,10 @@ window.echarts = {
 };
 """
 
+# 切到「全部」區間。預設是 60 天，歷史比 60 天長時表格只會有 60 列。
+WIN_ALL_JS = """() => { const b = [...document.querySelectorAll('#winSeg button')]
+                        .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }"""
+
 errors = []
 with sync_playwright() as pw:
     b = pw.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
@@ -250,9 +254,12 @@ with sync_playwright() as pw:
                      ([], -90500)):
         pg.evaluate(
             """(names) => {
-                 const labs = [...document.querySelectorAll('#chipChks label')];
-                 const order = ['外資台指期未平倉','前十大交易人','前十大特定人','選擇權外資淨口數','選擇權自營商淨口數'];
+                 // 只動五票那五個；最後那個「大盤融資維持率」不投票，另外測
+                 const labs = [...document.querySelectorAll('#chipChks label:not(.chk-margin)')];
                  const keys  = ['foreign_fut','top10_trader','top10_specific','foreign_opt','dealer_opt'];
+                 if (labs.length !== keys.length) {
+                   throw new Error('五票的勾選框應該有 ' + keys.length + ' 個，實得 ' + labs.length);
+                 }
                  labs.forEach((l,i) => {
                    const cb = l.querySelector('input');
                    const want = !names.includes(keys[i]);
@@ -483,6 +490,79 @@ with sync_playwright() as pw:
     after_broken = pg.evaluate(
         "() => (document.querySelector('#winSeg button.on') || {}).dataset")
 
+    # ---------- 大盤融資維持率 ----------
+    # 再開第三份副本，這次多一個 data/history/margin.csv。
+    # 刻意讓它比籌碼短（前面幾天沒有）而且中間缺一天：
+    #   短 —— 剛上線時只回填了近 90 天，籌碼卻有一整年，前端必須照日期對齊；
+    #   缺 —— 連假或來源當天掛掉會留一個洞，線要斷開而不是接成一條假的水平線。
+    _p3 = os.path.join(_tmp, "proj3")
+    _sh.copytree(ROOT, _p3, ignore=_sh.ignore_patterns(
+        "dist", "__pycache__", ".git", "node_modules"))
+    _m_skip_head = 3                       # 前 3 天沒有維持率
+    _m_gap = len(chips) // 2               # 中間挖掉這一天
+    _m_want, _m_rows = [], []
+    for _i, _c in enumerate(chips):
+        if _i < _m_skip_head or _i == _m_gap:
+            _m_want.append(None)
+            continue
+        _v = round(165 + (_i % 11) * 0.73, 2)
+        _m_want.append(_v)
+        _m_rows.append({"date": _c["date"], "ratio": _v,
+                        "twse_ratio": _v, "otc_ratio": _v,
+                        "numerator": 1000, "denominator": 1000})
+    with open(os.path.join(_p3, "data", "history", "margin.csv"),
+              "w", encoding="utf-8", newline="") as f:
+        _w = csv.DictWriter(f, fieldnames=["date", "ratio", "twse_ratio",
+                                           "otc_ratio", "numerator",
+                                           "denominator"], lineterminator="\n")
+        _w.writeheader()
+        for _r in _m_rows:
+            _w.writerow(_r)
+    _sp.run([sys.executable, "build_site.py"], cwd=_p3, check=True,
+            capture_output=True)
+
+    pg.goto("file://" + os.path.join(_p3, "index.html"))
+    pg.wait_for_selector("#dataTable tbody tr")
+    pg.evaluate(WIN_ALL_JS)
+    pg.wait_for_timeout(150)
+
+    MARGIN_JS = """() => {
+        const o = window.__OPTS__[window.__OPTS__.length - 1];
+        const ser = o.series.find(s => s.name === '大盤融資維持率') || null;
+        const lab = document.querySelector('#chipChks label.chk-margin');
+        const cb = lab && lab.querySelector('input');
+        return {
+          ser: ser && { y: ser.yAxisIndex, x: ser.xAxisIndex, type: ser.type,
+                        dash: ser.lineStyle && ser.lineStyle.type,
+                        connect: ser.connectNulls, data: ser.data },
+          axisShown: o.yAxis[4] ? o.yAxis[4].show : null,
+          axisName: o.yAxis[4] ? o.yAxis[4].name : null,
+          gridRight: o.grid.map(g => g.right),
+          legend: o.legend[1].data,
+          votes: o.series.filter(s => s.xAxisIndex === 1 && s.name
+                    && !s.name.startsWith('__') && s.name !== '大盤融資維持率').length,
+          total: (o.series.find(s => s.name === '五票總分') || {}).data,
+          tip: o.tooltip.formatter([{dataIndex: 10}]),
+          cb: cb && { checked: cb.checked, disabled: cb.disabled,
+                      text: lab.textContent, title: lab.title }
+        };
+      }"""
+
+    margin_on = pg.evaluate(MARGIN_JS)
+    pg.evaluate("""() => { const cb = document.querySelector('#chipChks label.chk-margin input');
+                           cb.checked = false;
+                           cb.dispatchEvent(new Event('change', {bubbles:true})); }""")
+    pg.wait_for_timeout(150)
+    margin_off = pg.evaluate(MARGIN_JS)
+
+    # 沒有 margin.csv 的那一份（_p2）：勾選框必須是鎖住的，而且完全沒有那條線。
+    # 不能默默畫一條空線或把缺的日子當 0——0% 維持率是個荒謬但「看起來有資料」的值。
+    pg.goto("file://" + os.path.join(_p2, "index.html"))
+    pg.wait_for_selector("#dataTable tbody tr")
+    pg.evaluate(WIN_ALL_JS)
+    pg.wait_for_timeout(150)
+    margin_absent = pg.evaluate(MARGIN_JS)
+
     b.close()
     _sh.rmtree(_tmp, ignore_errors=True)
 
@@ -682,9 +762,10 @@ for thr in (-83000, -80000):
             fails.append("K 棒 OHLC 順序不對：%s" % first)
     # 副圖：foreign_fut 獨立 y 軸
     chip_s = {s["name"]: s for s in o["series"]
-              if s.get("xAxisIndex") == 1 and s.get("name") != "__sub_guide"}
+              if s.get("xAxisIndex") == 1 and s.get("name") != "__sub_guide"
+              and s.get("name") != "大盤融資維持率"}
     if len(chip_s) != 5:
-        fails.append("副圖籌碼線數量 %d != 5" % len(chip_s))
+        fails.append("副圖籌碼線（不含融資維持率）數量 %d != 5" % len(chip_s))
     fa = chip_s.get("外資台指期未平倉", {}).get("yAxisIndex")
     others = set(s["yAxisIndex"] for n, s in chip_s.items()
                  if n not in ("外資台指期未平倉", "__sub_guide"))
@@ -798,6 +879,110 @@ for idx, tip in zip([0, 5, 20], tips):
     if txt.find("總分") < p_vote:
         fails.append("tooltip(%s) 總分跑到五票前面了" % d)
 print("tooltip：只剩籌碼——票數緊接在日期之後，個股行情與乖離率已移除，小計/總分在最後")
+
+# ---------- 大盤融資維持率 ----------
+# 這一條的重點是「它不是第六票」。最容易出錯的方向是讓它影響到總分，
+# 或是把缺的日子當 0（0% 維持率看起來像有資料，但荒謬到沒有人會去懷疑那是缺值）。
+_mo = margin_on
+if not _mo["cb"]:
+    fails.append("副圖籌碼線那一排少了融資維持率的勾選框")
+else:
+    if _mo["cb"]["disabled"]:
+        fails.append("有 margin.csv 時勾選框不該是鎖住的")
+    if not _mo["cb"]["checked"]:
+        fails.append("有 margin.csv 時維持率應該預設勾選")
+    if "不投票" not in _mo["cb"]["text"]:
+        fails.append("勾選框要寫明它不投票，實得 %r" % _mo["cb"]["text"])
+
+if not _mo["ser"]:
+    fails.append("有 margin.csv 時副圖應該要有「大盤融資維持率」這條線")
+else:
+    _s = _mo["ser"]
+    if _s["y"] != 4 or _s["x"] != 1:
+        fails.append("維持率應該畫在副圖（xAxisIndex 1）的第 5 根 y 軸，實得 x=%s y=%s"
+                     % (_s["x"], _s["y"]))
+    if _s["type"] != "line":
+        fails.append("維持率應該是折線，實得 %s" % _s["type"])
+    if _s["dash"] != "dashed":
+        fails.append("維持率要用虛線（和五票的實線區分開），實得 %r" % _s["dash"])
+    if _s["connect"] is not False:
+        fails.append("維持率的 connectNulls 必須是 false，不然缺的日子會連成一條假線")
+    if _s["data"] != _m_want:
+        _diff = [(i, a, b2) for i, (a, b2) in enumerate(zip(_s["data"], _m_want))
+                 if a != b2][:5]
+        fails.append("維持率的數列和 margin.csv 對不上（照日期對齊才對），前幾個差異 %s"
+                     % _diff)
+    else:
+        _nulls = [i for i, v in enumerate(_s["data"]) if v is None]
+        if _nulls != list(range(_m_skip_head)) + [_m_gap]:
+            fails.append("維持率缺值的位置不對：%s" % _nulls)
+
+if _mo["axisShown"] is not True:
+    fails.append("有維持率時第 5 根 y 軸要顯示，實得 show=%r" % _mo["axisShown"])
+if _mo["axisName"] and "%" not in _mo["axisName"]:
+    fails.append("維持率那根軸的名稱要標單位（%%），實得 %r" % _mo["axisName"])
+if _mo["votes"] != 5:
+    fails.append("副圖的五票線應該還是 5 條（維持率不算），實得 %d" % _mo["votes"])
+if "大盤融資維持率" not in (_mo["legend"] or []):
+    fails.append("副圖圖例少了維持率：%s" % (_mo["legend"],))
+if _mo["gridRight"][0] != _mo["gridRight"][1]:
+    fails.append("主圖和副圖的右邊距要一樣，不然兩張圖的 x 軸會錯開：%s"
+                 % (_mo["gridRight"],))
+if not (_mo["gridRight"][0] > margin_off["gridRight"][0]):
+    fails.append("多一根軸就要多留右邊距，實得 開 %s / 關 %s"
+                 % (_mo["gridRight"][0], margin_off["gridRight"][0]))
+
+# tooltip：有勾才出現，而且要寫「不投票」
+_tip_on = re.sub(r"<[^>]+>", "|", _mo["tip"])
+if "大盤融資維持率" not in _mo["tip"]:
+    fails.append("勾起來時 tooltip 應該要有維持率那一行")
+elif "%.2f" % _m_want[10] not in _tip_on.replace(",", ""):
+    fails.append("tooltip 裡的維持率數值不對，應該是 %.2f%%：%r"
+                 % (_m_want[10], _tip_on[-160:]))
+if "不投票" not in _mo["tip"]:
+    fails.append("tooltip 的維持率要註明不投票，免得被當成第六票")
+# 五票的部分一個字都不該被它擠掉
+for _w in ("本日操作", "期貨小計", "選擇權小計", "總分", "計分模式"):
+    if _w not in _mo["tip"]:
+        fails.append("加了維持率之後 tooltip 少了「%s」" % _w)
+if _tip_on.find("總分") > _tip_on.find("大盤融資維持率"):
+    fails.append("維持率跑到總分前面了——它只是參考線，要排在五票與總分之後")
+
+# 取消勾選：線、軸、tooltip 那一行都要消失，而且總分完全不變
+if margin_off["ser"]:
+    fails.append("取消勾選後不該還有維持率那條線")
+if margin_off["axisShown"] is not False:
+    fails.append("取消勾選後第 5 根 y 軸要隱藏，實得 show=%r" % margin_off["axisShown"])
+if "大盤融資維持率" in margin_off["tip"]:
+    fails.append("取消勾選後 tooltip 不該還有維持率那一行")
+if margin_off["total"] != _mo["total"]:
+    fails.append("勾選維持率改變了五票總分——它不該參與投票")
+if margin_off["votes"] != 5:
+    fails.append("取消勾選後副圖的五票線應該還是 5 條，實得 %d" % margin_off["votes"])
+
+# 沒有 margin.csv 的情況
+if margin_absent["ser"]:
+    fails.append("沒有 margin.csv 時不該畫出維持率那條線")
+if margin_absent["axisShown"] is not False:
+    fails.append("沒有 margin.csv 時第 5 根 y 軸要隱藏")
+if "大盤融資維持率" in margin_absent["tip"]:
+    fails.append("沒有 margin.csv 時 tooltip 不該提到維持率")
+if not margin_absent["cb"]:
+    fails.append("沒有 margin.csv 時勾選框還是要在（鎖住並說明怎麼補）")
+else:
+    if not margin_absent["cb"]["disabled"]:
+        fails.append("沒有 margin.csv 時勾選框必須鎖住")
+    if margin_absent["cb"]["checked"]:
+        fails.append("沒有 margin.csv 時勾選框不該是勾起來的")
+    if "--only-margin" not in (margin_absent["cb"]["title"] or ""):
+        fails.append("鎖住時要說清楚跑什麼指令補，實得 %r"
+                     % margin_absent["cb"]["title"])
+if margin_absent["gridRight"][0] != margin_off["gridRight"][0]:
+    fails.append("沒有維持率時右邊距應該和取消勾選時一樣")
+
+print("大盤融資維持率：照日期對齊（%d 天有值、%d 天留空且線斷開）、"
+      "虛線獨立第 5 軸、不改變五票總分、沒有歷史檔時鎖住"
+      % (len(_m_rows), len(_m_want) - len(_m_rows)))
 
 for scheme, items in contrast.items():
     for it in items:

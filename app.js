@@ -23,6 +23,12 @@
     { key: 'dealer_opt',     label: '選擇權自營商淨口數', short: '選擇權自營', color: '#e87ba4', axis: 'small' }
   ];
 
+  // 大盤融資維持率。不是五票的一員，也不投票——它是一條「市場整體擔保品
+  // 水位」的參考線，所以顏色刻意離五票的色盤遠一點，線型也用虛線，
+  // 一眼就看得出它和那五條是不同性質的東西。
+  var MARGIN_COLOR = '#8a6d1f';
+  var MARGIN_LABEL = '大盤融資維持率';
+
   var UP = '#d93b30', DOWN = '#12996b';
   var UP_SOFT = 'rgba(217,59,48,0.09)', DOWN_SOFT = 'rgba(18,153,107,0.09)';
   var SCORE_COLOR = '#2a78d6';
@@ -46,6 +52,8 @@
     pinned: null,          // 釘住的那天（存日期字串，不是索引——切區間索引會位移）
     pinAt: null,           // 釘住時點的位置 {x, y}，用來擺面板
     shown: {},             // key -> bool
+    margin: {},            // date -> 融資維持率(%)；來源和籌碼不同，只能照日期對齊
+    showMargin: true,      // 副圖要不要畫那條維持率
     bias: {}               // code -> { date: {ma, bias} }
   };
   CHIP_FIELDS.forEach(function (f) { S.shown[f.key] = true; });
@@ -240,6 +248,22 @@
       return o;
     });
   }
+  // 維持率的歷史檔還是空的（新功能剛加、或回填還沒跑）時，不要放一個
+  // 永遠沒有線的勾選框在那裡，直接說要跑什麼補。
+  function marginReady() {
+    for (var k in S.margin) {
+      if (Object.prototype.hasOwnProperty.call(S.margin, k)) return true;
+    }
+    return false;
+  }
+  function marginAt(date) {
+    var v = S.margin[date];
+    return (v === undefined || v === null) ? null : v;
+  }
+  function marginSeriesData() {
+    return S.dates.map(function (d) { return marginAt(d); });
+  }
+
   // 近月欄位是後來才加的。舊資料沒有的話不能默默當 0——0 看起來很合理，
   // 混進去幾乎不可能被發現——所以直接把那個選項鎖起來，並說要跑什麼補。
   function frontReady() {
@@ -659,6 +683,23 @@
       g.appendChild(lab);
     });
 
+    // 維持率的勾選框和那五條放在一起，但多一條分隔與說明——
+    // 它不投票，勾起來只是多一條參考線，不會改變任何一票或總分。
+    var mReady = marginReady();
+    var mlab = document.createElement('label');
+    mlab.className = 'chk-margin';
+    var mcb = document.createElement('input');
+    mcb.type = 'checkbox';
+    mcb.checked = S.showMargin && mReady;
+    mcb.disabled = !mReady;
+    mcb.onchange = function () { S.showMargin = mcb.checked; render(); };
+    var msw = document.createElement('span');
+    msw.className = 'swatch dashed';   // 顏色由 style.css 的 border-top 畫
+    mlab.appendChild(mcb); mlab.appendChild(msw);
+    mlab.appendChild(document.createTextNode(MARGIN_LABEL + '（不投票）'));
+    if (!mReady) mlab.title = '歷史檔還沒有維持率資料，跑 python3 update_daily.py --only-margin --days 130 補齊';
+    g.appendChild(mlab);
+
     var rng = el('thrRange'), num = el('thrNum');
     function setThr(v, from) {
       v = Math.round(Number(v));
@@ -831,6 +872,8 @@
     };
 
     var sub = subAxisRanges();
+    var showMargin = S.showMargin && marginReady();
+    var subRight = showMargin ? 124 : 62;
 
     // 副圖的對齊基準線：左軸 0 == 右軸門檻，兩者在同一個高度
     var subGuide = {
@@ -865,6 +908,23 @@
       };
     });
 
+    // 維持率（%）和口數不是同一個量級也不是同一個單位，所以給它自己的軸，
+    // 擺在外資期貨那根軸再往右 offset 的位置。刻意不去對齊格線——
+    // 口數那兩軸的格線有「門檻 = 0」的意義，維持率沒有對應的基準點，
+    // 硬是對齊只會讓人以為那條格線對它也代表什麼。
+    if (S.showMargin && marginReady()) {
+      chipSeries = chipSeries.concat([{
+        name: MARGIN_LABEL,
+        type: 'line', xAxisIndex: 1, yAxisIndex: 4,
+        data: marginSeriesData(),
+        symbol: 'circle', symbolSize: 4, showSymbol: false,
+        lineStyle: { width: 1.8, color: MARGIN_COLOR, type: 'dashed' },
+        itemStyle: { color: MARGIN_COLOR },
+        connectNulls: false,       // 沒有維持率的那幾天要斷開，不要連成假線
+        emphasis: { focus: 'series' }
+      }]);
+    }
+
     var legendData = priceSeries.map(function (s) { return s.name; })
       .concat(['五票總分']);
 
@@ -878,8 +938,9 @@
           itemGap: 14, textStyle: { fontSize: 11.5, color: '#52514e' } }
       ],
       grid: [
-        { left: 72, right: 62, top: 46, height: 470 },
-        { left: 72, right: 62, top: 580, height: 150 }
+        // 右邊距要跟著副圖軸數調整：多一條維持率軸就多一排刻度要擺。
+        { left: 72, right: subRight, top: 46, height: 470 },
+        { left: 72, right: subRight, top: 580, height: 150 }
       ],
       axisPointer: { link: [{ xAxisIndex: 'all' }], label: { backgroundColor: '#52514e' } },
       tooltip: {
@@ -945,6 +1006,17 @@
           axisLine: { show: false }, axisTick: { show: false },
           axisLabel: { color: '#2a78d6', fontSize: 10.5 },
           splitLine: { show: false }
+        },
+        { // 副圖再往右：大盤融資維持率（%）。自己 auto-scale，不參與格線對齊
+          type: 'value', gridIndex: 1, position: 'right', offset: 62,
+          scale: true, show: showMargin,
+          name: showMargin ? '%（融資維持率）' : '',
+          nameTextStyle: { color: MARGIN_COLOR, fontSize: 10.5, align: 'right' },
+          nameGap: 12,
+          axisLine: { show: false }, axisTick: { show: false },
+          axisLabel: { color: MARGIN_COLOR, fontSize: 10.5,
+                       formatter: function (v) { return v.toFixed(0) + '%'; } },
+          splitLine: { show: false }
         }
       ],
       series: [bgSeries('__bg_up', bgUp), bgSeries('__bg_dn', bgDn)]
@@ -960,6 +1032,10 @@
    * 個股的 OHLC 與乖離率刻意不放——這張卡片是用來讀「今天籌碼怎麼投」的，
    * 把六檔股票的行情混進來會把真正重要的那幾行擠到下面去。
    * 個股那些數字在下方的逐日明細表格裡都查得到（收盤、漲跌幅、MA20、乖離率）。
+   *
+   * 大盤融資維持率是唯一的例外，而且只在那條線有勾起來的時候才出現，
+   * 擺在總分下面、和五票明顯分開：它是全市場的數字（不是個股），
+   * 而且不投票，所以不能混進五票那張表裡。
    */
   function tooltipHtml(idx, sc) {
     var d = S.dates[idx], c = S.chips[idx], s = sc[idx];
@@ -997,6 +1073,20 @@
         (!s ? '#a09e97' : s.total > 0 ? UP : s.total < 0 ? DOWN : '#0b0b0b') + '">' +
         fmtScore(s ? s.total : null) + '</b></span>' +
       '</div>';
+
+    // 大盤融資維持率（有勾才顯示，而且不投票）
+    if (S.showMargin && marginReady()) {
+      var mv = marginAt(d);
+      h += '<div style="padding:4px 11px 7px;border-top:1px solid #ececE8;font-size:11.5px">' +
+        '<span style="display:inline-block;width:8px;height:2px;border-top:2px dashed ' +
+          MARGIN_COLOR + ';vertical-align:middle;margin-right:6px"></span>' +
+        '<span style="color:#807e78">' + MARGIN_LABEL + '</span> <b style="color:' +
+          (mv === null ? '#a09e97' : MARGIN_COLOR) + '">' +
+          (mv === null ? '—' : mv.toFixed(2) + '%') + '</b>' +
+        '<span style="color:#a09e97;font-size:10.5px;margin-left:6px">' +
+          (mv === null ? '這天沒有維持率資料' : '不投票') + '</span>' +
+        '</div>';
+    }
 
     h += '<div style="padding:0 11px 8px;font-size:10.5px;color:#a09e97">計分模式：' + modeLabel() +
          (S.mode === 'level' ? '（第 1 票門檻 ' + fmt(S.threshold) + ' 口）'
@@ -1127,6 +1217,13 @@
     if (site.defaultLargeScope) S.scope = site.defaultLargeScope;
     if (S.scope === 'front' && !frontReady()) S.scope = 'all';
     applyScope();
+
+    // 融資維持率和籌碼是兩套獨立來源，天數不保證一樣（剛上線時只有近 90 天，
+    // 籌碼卻有一整年），所以存成 date -> ratio 的查表，畫圖時照日期對齊；
+    // 對不到的那天就是 null，線會斷開而不是接成一條假的水平線。
+    S.margin = {};
+    (site.margin || []).forEach(function (r) { S.margin[r.date] = r.ratio; });
+    if (!marginReady()) S.showMargin = false;
 
     if (site.maPeriod) MA_PERIOD = site.maPeriod;
     if (site.biasAlert) BIAS_ALERT = site.biasAlert;

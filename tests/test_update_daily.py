@@ -455,6 +455,116 @@ if os.path.exists(_wf):
         check(len(_c.split()) == 5, "cron 欄位數不對：%r" % _c)
     print("  排程：%d 個 cron，分鐘數全部避開整點" % len(_crons))
 
+# 12) 大盤融資維持率是獨立的一項：櫃買中心掛掉不可以讓當天的籌碼也沒有資料。
+#     這一條釘住「維持率失敗 → 離開碼 3，但籌碼與股價照樣寫入」。
+#     會壞的方式很具體：把維持率併進 one_day 的五欄同進退裡，
+#     或是在 main() 裡讓它一失敗就 sys.exit(1)——兩種都會讓櫃買的小故障
+#     變成當天整條管線沒資料，而且隔天的排程是綠的，沒人會發現。
+import margin  # noqa: E402
+
+# 前面幾節把 chips.csv 換成 10) 的舊格式 fixture 了，所以這裡自己重建一組
+# 最小而且「完整」的歷史：一天籌碼 + 那天所有 config 標的的股價。
+# 這樣 one_day 會回 skipped（完整 ⇒ 不連外），main() 的流程才跑得到維持率那一段。
+_m_date = "2026/02/03"
+_cfg12 = build_site.load_config()
+store.upsert_chips([{"date": _m_date, "foreign_fut": -81000,
+                     "top10_trader": 500, "top10_specific": -300,
+                     "top10_trader_front": -120, "top10_specific_front": -900,
+                     "foreign_opt": 120, "dealer_opt": -80}], force=True)
+store.upsert_prices([{"date": _m_date, "code": s["code"], "open": 100.0,
+                      "high": 110.0, "low": 90.0, "close": 105.0,
+                      "change": 5.0, "volume": 50}
+                     for s in _cfg12["stocks"]], force=True)
+
+
+def _margin_ok(date):
+    return {"date": date, "ratio": 171.41, "twse_ratio": 171.76,
+            "otc_ratio": 170.71, "numerator": 125983312930,
+            "denominator": 73500000000, "_detail": {}}
+
+
+def _margin_boom(date):
+    raise margin.MarginError("假裝櫃買中心掛了")
+
+
+def _margin_pending(date):
+    raise margin.NoMarginForDate("假裝還沒公布")
+
+
+def _run_main(argv, margin_fn):
+    """跑一次 main()，回傳離開碼（0 = 正常結束）。"""
+    margin.fetch_day = margin_fn
+    taifex.fetch_day = boom              # 籌碼都已經有了，不該連外
+    fetch_prices.fetch_raw = boom
+    taifut.fetch_month = boom
+    update_daily._PRICE_CACHE.clear()
+    old = sys.argv
+    sys.argv = ["update_daily.py"] + argv
+    # main() 自己會印一大段（含 build_site 的缺股價警告），這裡只在意離開碼
+    import contextlib
+    import io as _io
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            update_daily.main()
+        return 0
+    except SystemExit as e:
+        return e.code or 0
+    finally:
+        sys.argv = old
+
+
+_before12 = snapshot()
+_rc = _run_main(["--date", _m_date], _margin_boom)
+check(_rc == 3, "維持率失敗應該是離開碼 3（不是 1，也不是 0），實得 %r" % _rc)
+check(snapshot() == _before12, "維持率失敗不該動到籌碼或股價歷史檔")
+check(store.read_margin() == [], "維持率失敗時 margin.csv 不該寫進任何東西")
+
+_rc = _run_main(["--date", _m_date], _margin_pending)
+check(_rc == 0, "維持率「尚未公布」是正常的，應該是離開碼 0，實得 %r" % _rc)
+check(store.read_margin() == [], "尚未公布時不該寫入")
+
+_rc = _run_main(["--date", _m_date], _margin_ok)
+check(_rc == 0, "維持率抓到了應該正常結束，實得 %r" % _rc)
+_mrows = store.read_margin()
+check(len(_mrows) == 1 and _mrows[0]["date"] == _m_date,
+      "維持率應該寫進 margin.csv，實得 %s" % _mrows)
+check(_mrows[0]["ratio"] == 171.41, "維持率的值不對：%s" % _mrows[0])
+
+# 再跑一次要冪等，而且不可以再呼叫 fetch_day
+_rc = _run_main(["--date", _m_date], _margin_boom)
+check(_rc == 0, "已經有維持率的日子應該直接略過（連 fetch_day 都不呼叫），實得 %r" % _rc)
+check(len(store.read_margin()) == 1, "重跑不該多一筆")
+
+# --no-margin 完全不碰維持率
+_rc = _run_main(["--date", _m_date, "--no-margin"], _margin_boom)
+check(_rc == 0, "--no-margin 時維持率的失敗不該有任何影響，實得 %r" % _rc)
+
+# --only-margin 不碰籌碼與股價（籌碼的 fetch_day 是 boom，所以若有碰就會炸）
+_before13 = snapshot()
+_rc = _run_main(["--date", _m_date, "--only-margin", "--force"], _margin_ok)
+check(_rc == 0, "--only-margin 應該正常結束，實得 %r" % _rc)
+check(snapshot() == _before13, "--only-margin 不該動到籌碼或股價歷史檔")
+print("  融資維持率：獨立於籌碼（失敗 → 離開碼 3，資料照寫）、冪等、"
+      "尚未公布不算失敗、--no-margin / --only-margin 都有效")
+
+# 13) build_site 要把維持率送出去，而且是照日期對齊的 {date, ratio} 陣列。
+#     不是和籌碼一樣長的平行陣列——兩邊來源不同，天數本來就不一樣，
+#     用索引對齊的話剛上線那段（維持率只有 90 天、籌碼有一整年）會整條錯位。
+import contextlib as _ctx  # noqa: E402
+import io as _io2  # noqa: E402
+with _ctx.redirect_stderr(_io2.StringIO()):     # 缺股價的警告在這一節不是重點
+    _site = build_site.build(quiet=True)
+check("margin" in _site, "site.json 要有 margin 這個 key")
+check(isinstance(_site["margin"], list), "margin 要是陣列")
+check(_site["margin"] and _site["margin"][0]["date"] == _m_date,
+      "margin 裡應該有剛寫入的那天：%s" % _site["margin"][:3])
+check(set(_site["margin"][0]) == {"date", "ratio"},
+      "margin 的每一筆只要 date 與 ratio，實得 %s" % list(_site["margin"][0]))
+check(len(_site["margin"]) != len(_site["chips"]) or len(_site["chips"]) == 1,
+      "這個測試環境裡維持率只有 1 天、籌碼有很多天，正好用來確認前端不能靠索引對齊")
+print("  site.json：維持率是 {date, ratio} 陣列（天數可以和籌碼不同，前端照日期對齊）")
+
 shutil.rmtree(work, ignore_errors=True)
 
 print()
@@ -464,4 +574,5 @@ if fails:
         print("   -", f)
     sys.exit(1)
 print("✅ 每日更新流程通過："
-      "冪等、五欄同進退、尚未公布不算失敗、解析失敗不動歷史檔、寫入後 build 正常")
+      "冪等、五欄同進退、尚未公布不算失敗、解析失敗不動歷史檔、寫入後 build 正常、"
+      "融資維持率獨立於籌碼")

@@ -217,3 +217,18 @@ td.delta.neg{color:var(--down)}
   padding:14px 16px;border-radius:8px;margin-top:14px;font-size:13px;line-height:1.7;
 }
 .err code{background:#fff;padding:1px 5px;border-radius:3px}
+
+/* 大盤融資維持率的勾選框。和五票那五個同一排，但前面多一條分隔線，
+   因為它的性質不同——只是一條參考線，不投票。 */
+.chk-group label.chk-margin{
+  margin-left:6px; padding-left:14px;
+  border-left:1px solid #e2e2dd;
+}
+.chk-group label.chk-margin input:disabled + .swatch{opacity:.35}
+.chk-group label.chk-margin input:disabled ~ *{color:#a09e97}
+/* 虛線色塊，和圖上的虛線對得起來 */
+.swatch.dashed{
+  height:0; border-top:2px dashed currentColor; background:none !important;
+  border-radius:0; align-self:center;
+}
+.chk-group label.chk-margin .swatch.dashed{color:#8a6d1f}

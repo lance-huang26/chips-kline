@@ -92,6 +92,13 @@ def build(quiet=False):
 
     chip_dates = [c["date"] for c in chips]
 
+    # 大盤融資維持率。和籌碼是兩套獨立的來源，日期不保證一樣多
+    # （剛加這個功能時只有最近 90 天，籌碼卻有一整年），所以前端是照日期對齊，
+    # 不是照索引。這裡只送合併口徑那一個數字，上市／上櫃分開的值留在
+    # data/history/margin.csv 裡供查帳用。
+    margin_rows = [{"date": r["date"], "ratio": r["ratio"]}
+                   for r in store.read_margin() if r["ratio"] is not None]
+
     site = {
         "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "maPeriod": cfg["maPeriod"],
@@ -107,6 +114,7 @@ def build(quiet=False):
         "windowOptions": cfg["windowOptions"],
         "settlements": settlements(chip_dates, cfg.get("settlementOverrides", {})),
         "chips": [{k: c[k] for k in store.CHIP_COLS} for c in chips],
+        "margin": margin_rows,
         "stocks": [{"code": c, "name": names[c], "rows": by_code[c]} for c in codes],
     }
 
@@ -145,6 +153,13 @@ def build(quiet=False):
                     s["rows"][0]["date"], s["rows"][-1]["date"]))
             else:
                 print("  %s %s：股價 0 筆（尚未補抓）" % (s["code"], s["name"]))
+        if margin_rows:
+            print("  融資維持率 %d 天（%s ~ %s），最新 %.2f%%"
+                  % (len(margin_rows), margin_rows[0]["date"],
+                     margin_rows[-1]["date"], margin_rows[-1]["ratio"]))
+        else:
+            print("  融資維持率 0 天（跑 python3 update_daily.py --only-margin "
+                  "--days 130 補齊）")
         print("  結算日 %d 個：%s" % (len(site["settlements"]),
                                     ", ".join(site["settlements"])))
         print("  已寫出 data/site.json（%.0f KB）與 data/site.js"

@@ -5,6 +5,7 @@
   data/history/chips.csv    date,foreign_fut,top10_trader,top10_specific,
                             top10_trader_front,top10_specific_front,foreign_opt,dealer_opt
   data/history/prices.csv   date,code,open,high,low,close,change,volume
+  data/history/margin.csv   date,ratio,twse_ratio,otc_ratio,numerator,denominator
 
 用 CSV 是因為每天只 append 一行，git diff 一眼看得出當天抓到什麼。
 一年約 240 個交易日、三檔股票約 720 行，十年也還是小檔案，不需要輪替。
@@ -26,6 +27,7 @@ HISTORY = os.path.join(DATA, "history")
 
 CHIPS_CSV = os.path.join(HISTORY, "chips.csv")
 PRICES_CSV = os.path.join(HISTORY, "prices.csv")
+MARGIN_CSV = os.path.join(HISTORY, "margin.csv")
 
 CHIP_COLS = ["date", "foreign_fut", "top10_trader", "top10_specific",
              "top10_trader_front", "top10_specific_front",
@@ -35,6 +37,11 @@ CHIP_COLS = ["date", "foreign_fut", "top10_trader", "top10_specific",
 # 0 是一個看起來很合理的數字，混進去之後幾乎不可能被發現，所以寧可留空。
 CHIP_OPTIONAL = ("top10_trader_front", "top10_specific_front")
 PRICE_COLS = ["date", "code", "open", "high", "low", "close", "change", "volume"]
+
+# 大盤融資維持率。ratio 是合併口徑（上市＋上櫃），另外兩個分開存是為了出事時
+# 能一眼看出是哪個市場怪；分子分母也存，這樣要回頭驗算不必重抓四個端點。
+MARGIN_COLS = ["date", "ratio", "twse_ratio", "otc_ratio",
+               "numerator", "denominator"]
 
 
 def _read(path, cols, optional=()):
@@ -173,6 +180,40 @@ def upsert_prices(new_rows, force=False):
 def _num(v):
     f = float(v)
     return str(int(f)) if f == int(f) else repr(f)
+
+
+# ------------------------------------------------------------- 融資維持率
+def read_margin():
+    rows = _read(MARGIN_CSV, MARGIN_COLS)
+    for r in rows:
+        for c in ("ratio", "twse_ratio", "otc_ratio"):
+            r[c] = None if r[c] == "" else float(r[c])
+        for c in ("numerator", "denominator"):
+            r[c] = None if r[c] == "" else int(r[c])
+    return sorted(rows, key=lambda r: r["date"])
+
+
+def upsert_margin(new_rows, force=False):
+    cur = {r["date"]: r for r in read_margin()}
+    added = updated = skipped = 0
+    for r in new_rows:
+        row = {c: r.get(c) for c in MARGIN_COLS}
+        d = row["date"]
+        if d not in cur:
+            cur[d] = row
+            added += 1
+        elif force and cur[d] != row:
+            cur[d] = row
+            updated += 1
+        else:
+            skipped += 1
+    _write_atomic(MARGIN_CSV, MARGIN_COLS, [cur[d] for d in sorted(cur)])
+    return added, updated, skipped
+
+
+def latest_margin_date():
+    rows = read_margin()
+    return rows[-1]["date"] if rows else None
 
 
 def latest_chip_date():

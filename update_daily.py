@@ -11,8 +11,12 @@
 
 離開碼：
     0  正常（含「今天還沒有資料」——非交易日或尚未公布都算正常）
-    1  抓取或解析失敗，或驗證閘門沒過（歷史檔完全沒有被修改）
+    1  籌碼或股價抓取／解析失敗，或驗證閘門沒過（歷史檔完全沒有被修改）
     2  太久沒有新資料（--max-stale-days 觸發），管線可能已經壞掉
+    3  融資維持率失敗，但籌碼與股價是好的（已經寫入，只有維持率那一項沒有）
+
+  1 是「什麼都沒寫」，2 和 3 是「該寫的都寫了，但有事要告訴你」——
+  所以 workflow 看到 2 或 3 要先 commit 再把工作標成失敗，不然當天的資料會丟掉。
 
 設計重點：
   * 不看時鐘，只看資料。每個來源回傳的內容都帶自己的日期，對不上就當作尚未公布。
@@ -32,6 +36,7 @@ sys.path.insert(0, HERE)
 
 import build_site  # noqa: E402
 import fetch_prices  # noqa: E402
+import margin  # noqa: E402
 import store  # noqa: E402
 import taifex  # noqa: E402
 
@@ -170,6 +175,28 @@ def one_day(date, cfg, force=False, dry_run=False, use_cache=False):
     return "written", _fmt(chip, prices)
 
 
+def margin_day(date, existing, force=False, dry_run=False):
+    """大盤融資維持率。回傳 ('written' | 'skipped' | 'pending', 說明)。
+
+    刻意和籌碼完全分開跑：維持率要靠櫃買中心，而櫃買和期交所是兩套系統，
+    其中一邊壞掉不應該讓另一邊當天也沒有資料。所以這裡的失敗只影響維持率，
+    籌碼照樣寫入，最後再用離開碼 3 把這件事吵出來。
+    """
+    if date in existing and not force:
+        return "skipped", "已經有 %s 的維持率" % date
+    try:
+        r = margin.fetch_day(date)
+    except margin.NoMarginForDate as e:
+        return "pending", str(e)
+    note = ("合併 %.2f%%（上市 %.2f%% / 上櫃 %.2f%%）"
+            % (r["ratio"], r["twse_ratio"], r["otc_ratio"]))
+    if dry_run:
+        return "written", "（dry-run，沒有寫檔）" + note
+    store.upsert_margin([{c: r[c] for c in store.MARGIN_COLS}], force=force)
+    existing.add(date)
+    return "written", note
+
+
 def _fmt(chip, prices):
     a = "  ".join("%s=%s" % (f, format(chip[f], ",")) for f in taifex.CHIP_FIELDS)
     b = "  ".join("%s收%s" % (c, format(int(r["close"]), ",")) if r["close"] == int(r["close"])
@@ -190,6 +217,10 @@ def main():
                     help="股價改用 data/raw 既有回應（離線測試用）")
     ap.add_argument("--max-stale-days", type=int, default=0,
                     help="最新籌碼日期比今天舊超過這麼多天就以離開碼 2 結束")
+    ap.add_argument("--no-margin", action="store_true",
+                    help="不抓大盤融資維持率")
+    ap.add_argument("--only-margin", action="store_true",
+                    help="只抓大盤融資維持率，不動籌碼與股價（回填維持率時用）")
     args = ap.parse_args()
 
     cfg = build_site.load_config()
@@ -206,26 +237,54 @@ def main():
     if len(dates) > 1:
         print("要處理 %d 個工作日：%s ~ %s\n" % (len(dates), dates[0], dates[-1]))
 
-    written = pending = skipped = 0
-    for d in dates:
-        try:
-            status, msg = one_day(d, cfg, args.force, args.dry_run, args.use_cache)
-        except (taifex.TaifexError, fetch_prices.FetchError) as e:
-            print("\n[失敗] %s：%s" % (d, e), file=sys.stderr)
-            print("       歷史檔沒有被修改。", file=sys.stderr)
-            sys.exit(1)
-        icon = {"written": "＋", "filled": "⊕", "skipped": "・", "pending": "…"}[status]
-        print("%s %s  %s" % (icon, d, msg))
-        if status in ("written", "filled"):
-            written += 1
-        elif status == "skipped":
-            skipped += 1
-        else:
-            pending += 1
+    ICON = {"written": "＋", "filled": "⊕", "skipped": "・", "pending": "…"}
 
-    if len(dates) > 1:
-        print("\n共 %d 天：寫入/補齊 %d、已完整略過 %d、無資料 %d"
-              % (len(dates), written, skipped, pending))
+    written = pending = skipped = 0
+    if not args.only_margin:
+        for d in dates:
+            try:
+                status, msg = one_day(d, cfg, args.force, args.dry_run, args.use_cache)
+            except (taifex.TaifexError, fetch_prices.FetchError) as e:
+                print("\n[失敗] %s：%s" % (d, e), file=sys.stderr)
+                print("       歷史檔沒有被修改。", file=sys.stderr)
+                sys.exit(1)
+            print("%s %s  %s" % (ICON[status], d, msg))
+            if status in ("written", "filled"):
+                written += 1
+            elif status == "skipped":
+                skipped += 1
+            else:
+                pending += 1
+
+        if len(dates) > 1:
+            print("\n共 %d 天：寫入/補齊 %d、已完整略過 %d、無資料 %d"
+                  % (len(dates), written, skipped, pending))
+
+    # --- 大盤融資維持率（獨立於籌碼，失敗不影響上面已經寫好的資料）---
+    margin_failed = []
+    if not args.no_margin:
+        if not args.only_margin:
+            print("\n大盤融資維持率：")
+        have = {r["date"] for r in store.read_margin()}
+        mw = mp = ms = 0
+        for d in dates:
+            try:
+                status, msg = margin_day(d, have, args.force, args.dry_run)
+            except margin.MarginError as e:
+                print("  ✗ %s  %s" % (d, e), file=sys.stderr)
+                margin_failed.append(d)
+                continue
+            print("  %s %s  %s" % (ICON[status], d, msg))
+            if status == "written":
+                mw += 1
+            elif status == "skipped":
+                ms += 1
+            else:
+                mp += 1
+        if len(dates) > 1:
+            print("  共 %d 天：寫入 %d、已有略過 %d、無資料 %d、失敗 %d"
+                  % (len(dates), mw, ms, mp, len(margin_failed)))
+        written += mw
 
     if written and not args.dry_run:
         print("\n重建 site.json：")
@@ -242,6 +301,13 @@ def main():
                 print("\n[告警] 最新籌碼資料是 %s，已經 %d 天沒有更新——"
                       "管線可能壞了，或來源改版了。" % (latest, age), file=sys.stderr)
                 sys.exit(2)
+
+    if margin_failed:
+        print("\n[告警] 融資維持率有 %d 天失敗：%s%s"
+              % (len(margin_failed), "、".join(margin_failed[:6]),
+                 "…" if len(margin_failed) > 6 else ""), file=sys.stderr)
+        print("       籌碼與股價不受影響，已經寫入。", file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,9 @@ on:
         description: "回補十大交易人的『近月』欄位（加欄位後跑一次就好）"
         type: boolean
         default: false
+      margin_days:
+        description: "回填大盤融資維持率的天數（90 個交易日 ≒ 填 130）。留空 = 不做"
+        required: false
       force:
         description: "覆寫已存在的日期"
         type: boolean
@@ -94,6 +97,7 @@ jobs:
           python3 tests/test_taifut.py
           python3 tests/test_update_daily.py
           python3 tests/test_netssl.py
+          python3 tests/test_margin.py
 
       # 新增股票之後用。update_daily 對已經有籌碼的日子會整天略過，
       # 所以新股票的歷史股價不會被補上——這一步是專門補那個洞的。
@@ -113,6 +117,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 backfill_large.py
+          python3 build_site.py
+
+      # 大盤融資維持率是後來才加的，加之前的歷史沒有。跑一次把近 N 天補起來，
+      # 之後每天的排程會自己接著往下寫。四個端點、每天四次請求，
+      # 130 天約 520 次，所以這一步會跑十幾分鐘——不要排在排程裡，手動跑一次就好。
+      - name: 回填融資維持率（只在有指定天數時執行）
+        if: inputs.margin_days != ''
+        env:
+          IN_MD: ${{ inputs.margin_days }}
+        run: |
+          set -euo pipefail
+          python3 update_daily.py --only-margin --days "$IN_MD"
           python3 build_site.py
 
       - name: 抓取並更新
@@ -147,10 +163,25 @@ jobs:
           if [ "${IN_FORCE:-}" = "true" ]; then ARGS+=(--force); fi
 
           echo "執行：python3 update_daily.py ${ARGS[*]:-（無參數）}"
+          # 離開碼 2（太久沒有新資料）和 3（融資維持率失敗）的意思是
+          # 「該寫的都寫了，但有事要告訴你」。直接讓這一步失敗的話，
+          # 下面的 commit 不會執行，當天抓到的資料就白抓了——所以先接住，
+          # commit 完再用最後一步把工作標成失敗。只有 1 是真的什麼都沒寫。
+          set +e
           if [ ${#ARGS[@]} -eq 0 ]; then
             python3 update_daily.py
           else
             python3 update_daily.py "${ARGS[@]}"
+          fi
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" = "1" ]; then
+            echo "::error::抓取或驗證失敗，歷史檔沒有被修改"
+            exit 1
+          fi
+          if [ "$rc" != "0" ]; then
+            echo "::warning::update_daily 以離開碼 $rc 結束；先 commit 再回報"
           fi
 
       - name: commit 並 push
@@ -169,4 +200,16 @@ jobs:
             echo "push 失敗，重試 $i"
             sleep 5
           done
+          exit 1
+
+      # 資料已經 commit 了，但有狀況要讓這次工作變紅，否則沒人會發現。
+      - name: 回報 update_daily 的告警
+        if: steps.update.outputs.rc != '' && steps.update.outputs.rc != '0'
+        run: |
+          rc='${{ steps.update.outputs.rc }}'
+          case "$rc" in
+            2) echo "::error::太久沒有新資料（--max-stale-days）——管線可能壞了，或來源改版了" ;;
+            3) echo "::error::大盤融資維持率失敗；籌碼與股價不受影響，已經寫入並 commit" ;;
+            *) echo "::error::update_daily 以離開碼 $rc 結束" ;;
+          esac
           exit 1
