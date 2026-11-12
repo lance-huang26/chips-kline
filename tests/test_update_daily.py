@@ -465,7 +465,23 @@ import margin  # noqa: E402
 # 前面幾節把 chips.csv 換成 10) 的舊格式 fixture 了，所以這裡自己重建一組
 # 最小而且「完整」的歷史：一天籌碼 + 那天所有 config 標的的股價。
 # 這樣 one_day 會回 skipped（完整 ⇒ 不連外），main() 的流程才跑得到維持率那一段。
-_m_date = "2026/02/03"
+#
+# 這一節全部用「相對於現況的變化」來斷言，不假設 margin.csv 是空的。
+# 第一版寫成 read_margin() == [] ——那在功能剛上線、歷史檔還不存在時會過，
+# 等排程寫進第一批資料之後就天天紅，而測試是 workflow 的第一步，
+# 一紅就連抓都不抓，整條管線會安靜地停擺好幾天。同樣的坑在 9) 也踩過一次。
+_m_before = {r["date"]: r for r in store.read_margin()}
+
+
+def _m_now():
+    return {r["date"]: r for r in store.read_margin()}
+
+
+# 挑一個歷史檔裡一定沒有的工作日，免得撞到真的資料
+_cand = _dt.date(2026, 2, 3)
+while (_cand.strftime("%Y/%m/%d") in _m_before or _cand.weekday() >= 5):
+    _cand += _dt.timedelta(days=1)
+_m_date = _cand.strftime("%Y/%m/%d")
 _cfg12 = build_site.load_config()
 store.upsert_chips([{"date": _m_date, "foreign_fut": -81000,
                      "top10_trader": 500, "top10_specific": -300,
@@ -518,23 +534,28 @@ _before12 = snapshot()
 _rc = _run_main(["--date", _m_date], _margin_boom)
 check(_rc == 3, "維持率失敗應該是離開碼 3（不是 1，也不是 0），實得 %r" % _rc)
 check(snapshot() == _before12, "維持率失敗不該動到籌碼或股價歷史檔")
-check(store.read_margin() == [], "維持率失敗時 margin.csv 不該寫進任何東西")
+check(_m_now() == _m_before, "維持率失敗時 margin.csv 一個位元組都不該動")
 
 _rc = _run_main(["--date", _m_date], _margin_pending)
 check(_rc == 0, "維持率「尚未公布」是正常的，應該是離開碼 0，實得 %r" % _rc)
-check(store.read_margin() == [], "尚未公布時不該寫入")
+check(_m_now() == _m_before, "尚未公布時不該寫入")
 
 _rc = _run_main(["--date", _m_date], _margin_ok)
 check(_rc == 0, "維持率抓到了應該正常結束，實得 %r" % _rc)
-_mrows = store.read_margin()
-check(len(_mrows) == 1 and _mrows[0]["date"] == _m_date,
-      "維持率應該寫進 margin.csv，實得 %s" % _mrows)
-check(_mrows[0]["ratio"] == 171.41, "維持率的值不對：%s" % _mrows[0])
+_mrows = _m_now()
+check(set(_mrows) == set(_m_before) | {_m_date},
+      "應該剛好多出 %s 這一天，實得多了 %s / 少了 %s"
+      % (_m_date, sorted(set(_mrows) - set(_m_before)),
+         sorted(set(_m_before) - set(_mrows))))
+check(_mrows.get(_m_date, {}).get("ratio") == 171.41,
+      "維持率的值不對：%s" % _mrows.get(_m_date))
+check({d: r for d, r in _mrows.items() if d != _m_date} == _m_before,
+      "寫入新的一天不該改到原本就有的那些天")
 
 # 再跑一次要冪等，而且不可以再呼叫 fetch_day
 _rc = _run_main(["--date", _m_date], _margin_boom)
 check(_rc == 0, "已經有維持率的日子應該直接略過（連 fetch_day 都不呼叫），實得 %r" % _rc)
-check(len(store.read_margin()) == 1, "重跑不該多一筆")
+check(_m_now() == _mrows, "重跑不該多一筆，也不該改到任何一筆")
 
 # --no-margin 完全不碰維持率
 _rc = _run_main(["--date", _m_date, "--no-margin"], _margin_boom)
@@ -557,12 +578,16 @@ with _ctx.redirect_stderr(_io2.StringIO()):     # 缺股價的警告在這一節
     _site = build_site.build(quiet=True)
 check("margin" in _site, "site.json 要有 margin 這個 key")
 check(isinstance(_site["margin"], list), "margin 要是陣列")
-check(_site["margin"] and _site["margin"][0]["date"] == _m_date,
-      "margin 裡應該有剛寫入的那天：%s" % _site["margin"][:3])
-check(set(_site["margin"][0]) == {"date", "ratio"},
-      "margin 的每一筆只要 date 與 ratio，實得 %s" % list(_site["margin"][0]))
-check(len(_site["margin"]) != len(_site["chips"]) or len(_site["chips"]) == 1,
-      "這個測試環境裡維持率只有 1 天、籌碼有很多天，正好用來確認前端不能靠索引對齊")
+_sm = {r["date"]: r for r in _site["margin"]}
+check(_m_date in _sm, "margin 裡應該有剛寫入的 %s：%s" % (_m_date, _site["margin"][:3]))
+check(set(_sm) == set(_m_now()),
+      "site.json 的 margin 日期要和 margin.csv 完全一致")
+for _r in _site["margin"]:
+    if set(_r) != {"date", "ratio"}:
+        check(False, "margin 的每一筆只要 date 與 ratio，實得 %s" % list(_r))
+        break
+check([r["date"] for r in _site["margin"]] == sorted(_sm),
+      "margin 要照日期排序")
 print("  site.json：維持率是 {date, ratio} 陣列（天數可以和籌碼不同，前端照日期對齊）")
 
 shutil.rmtree(work, ignore_errors=True)

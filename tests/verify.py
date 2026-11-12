@@ -555,9 +555,20 @@ with sync_playwright() as pw:
     pg.wait_for_timeout(150)
     margin_off = pg.evaluate(MARGIN_JS)
 
-    # 沒有 margin.csv 的那一份（_p2）：勾選框必須是鎖住的，而且完全沒有那條線。
+    # 再一份「完全沒有 margin.csv」的：勾選框必須是鎖住的，而且完全沒有那條線。
     # 不能默默畫一條空線或把缺的日子當 0——0% 維持率是個荒謬但「看起來有資料」的值。
-    pg.goto("file://" + os.path.join(_p2, "index.html"))
+    #
+    # 要自己把檔案刪掉再 build 一次，不能假設 ROOT 沒有 margin.csv：
+    # 功能剛上線時確實沒有，但排程跑過之後就有了，寫死「沒有」的測試會從某天起天天紅。
+    _p4 = os.path.join(_tmp, "proj4")
+    _sh.copytree(ROOT, _p4, ignore=_sh.ignore_patterns(
+        "dist", "__pycache__", ".git", "node_modules"))
+    _mp4 = os.path.join(_p4, "data", "history", "margin.csv")
+    if os.path.exists(_mp4):
+        os.remove(_mp4)
+    _sp.run([sys.executable, "build_site.py"], cwd=_p4, check=True,
+            capture_output=True)
+    pg.goto("file://" + os.path.join(_p4, "index.html"))
     pg.wait_for_selector("#dataTable tbody tr")
     pg.evaluate(WIN_ALL_JS)
     pg.wait_for_timeout(150)
