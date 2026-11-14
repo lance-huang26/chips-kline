@@ -92,6 +92,39 @@ def build(quiet=False):
 
     chip_dates = [c["date"] for c in chips]
 
+    # 五票各自的基準點（投 +1 / -1 的分界）。來源是 config.json 的 baselineDate，
+    # 這裡把它解析成那一天的實際剩餘口數再送給前端。
+    #
+    # 為什麼存成「日期 + 解析後的數字」兩份：
+    #   * 數字是前端真正要用的，不該讓它自己再去翻歷史；
+    #   * 日期要留著，因為畫面上要寫「基準來自哪一天」，而且「重設為預設」
+    #     這個動作需要一個明確的目標。
+    #
+    # 日期不在歷史裡就直接失敗，不要退回別的日期。基準點會改變每一天的投票結果，
+    # 悄悄用錯一天的話畫面上完全看不出來——那是這裡最糟的失敗方式。
+    base_date = cfg.get("baselineDate")
+    if not base_date:
+        raise SystemExit("config.json 少了 baselineDate——五票的基準點沒有來源")
+    base_row = None
+    for c in chips:
+        if c["date"] == base_date:
+            base_row = c
+            break
+    if base_row is None:
+        raise SystemExit(
+            "config.json 的 baselineDate 是 %s，但 chips.csv 裡沒有這一天"
+            "（歷史是 %s ~ %s，而且只有交易日）——"
+            "請改成一個有資料的交易日，沒有退回其他日期這種事"
+            % (base_date, chip_dates[0], chip_dates[-1]))
+    baselines = {}
+    for col in store.CHIP_COLS[1:]:
+        v = base_row[col]
+        if v is None:
+            raise SystemExit(
+                "baselineDate %s 的 %s 是空的（近月欄位要先跑 backfill_large.py 補）"
+                "——基準點不可以用 0 代替" % (base_date, col))
+        baselines[col] = v
+
     # 大盤融資維持率。和籌碼是兩套獨立的來源，日期不保證一樣多
     # （剛加這個功能時只有最近 90 天，籌碼卻有一整年），所以前端是照日期對齊，
     # 不是照索引。這裡只送合併口徑那一個數字，上市／上櫃分開的值留在
@@ -103,8 +136,9 @@ def build(quiet=False):
         "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "maPeriod": cfg["maPeriod"],
         "biasAlert": cfg["biasAlert"],
-        "defaultThreshold": cfg["defaultThreshold"],
-        "thresholdPresets": cfg["thresholdPresets"],
+        "baselineDate": base_date,
+        "baselines": baselines,
+        "baselinePresets": cfg.get("baselinePresets", {}),
         "defaultWindow": cfg["defaultWindow"],
         "defaultLargeScope": cfg.get("defaultLargeScope", "all"),
         "defaultScoreMode": cfg.get("defaultScoreMode", "level"),
@@ -160,6 +194,9 @@ def build(quiet=False):
         else:
             print("  融資維持率 0 天（跑 python3 update_daily.py --only-margin "
                   "--days 130 補齊）")
+        print("  五票基準點（%s）：%s" % (
+            base_date, "、".join("%s=%s" % (k, format(baselines[k], ","))
+                                 for k in store.CHIP_COLS[1:])))
         print("  結算日 %d 個：%s" % (len(site["settlements"]),
                                     ", ".join(site["settlements"])))
         print("  已寫出 data/site.json（%.0f KB）與 data/site.js"

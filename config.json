@@ -28,11 +28,13 @@
   ],
   "maPeriod": 20,
   "biasAlert": 15,
-  "defaultThreshold": -83000,
-  "thresholdPresets": [
-    -83000,
-    -80000
-  ],
+  "baselineDate": "2026/09/09",
+  "baselinePresets": {
+    "foreign_fut": [
+      -83000,
+      -80000
+    ]
+  },
   "defaultWindow": 60,
   "windowOptions": [
     20,

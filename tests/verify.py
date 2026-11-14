@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 驗證：
- 1. 用 Python 獨立算一次五票分數（兩種門檻），
+ 1. 用 Python 獨立算一次五票分數（五票各有自己的基準點），
  2. 用 headless Chromium 開實際頁面（ECharts 以 stub 取代，因離線環境無 CDN），
     讀出畫面上的表格與 setOption 內容，
  3. 兩邊逐格比對。
@@ -21,6 +21,10 @@ for c in chips:
         if k != "date":
             c[k] = None if c[k] == "" else int(c[k])
 
+# 口徑覆寫會把 top10_trader 換成 _front，所以先留一份沒被動過的，
+# 基準點要從原始的七個欄位取（兩種口徑各一份）。
+RAW_CHIPS = [dict(c) for c in chips]
+
 with open(os.path.join(ROOT, "data", "site.json"), encoding="utf-8") as f:
     prices = json.load(f)          # 現在前端只讀 site.json
 
@@ -37,23 +41,69 @@ else:
     PAGE_SCOPE = "all"
 
 
-def score(c, thr):
-    v = [1 if c["foreign_fut"] > thr else -1,
-         1 if c["top10_trader"] > 0 else -1,
-         1 if c["top10_specific"] > 0 else -1,
-         1 if c["foreign_opt"] > 0 else -1,
-         1 if c["dealer_opt"] > 0 else -1]
-    return v, v[0]+v[1]+v[2], v[3]+v[4], sum(v)
+# 五票各自的基準點。site.json 帶的那一組是 config.json 的 baselineDate 解析出來的。
+# Python 端自己從 chips.csv 再算一次，確認 build_site 沒有把日期挑錯。
+BASE_DATE = prices["baselineDate"]
+BASE_COLS = ["foreign_fut", "top10_trader", "top10_specific",
+             "top10_trader_front", "top10_specific_front",
+             "foreign_opt", "dealer_opt"]
+_base_row = next((c for c in RAW_CHIPS if c["date"] == BASE_DATE), None)
+assert _base_row is not None, "chips.csv 裡沒有 baselineDate %s" % BASE_DATE
+BASE_FROM_CSV = {k: _base_row[k] for k in BASE_COLS}
+if prices["baselines"] != BASE_FROM_CSV:
+    print("❌ site.json 的 baselines 和 chips.csv 的 %s 那一列不符" % BASE_DATE)
+    print("   site.json:", prices["baselines"])
+    print("   chips.csv:", BASE_FROM_CSV)
+    sys.exit(1)
 
-exp = {}
-for thr in (-83000, -80000):
-    exp[thr] = [score(c, thr) for c in chips]
+
+def base_of(key, scope=None):
+    """依口徑挑基準。十大那兩票近月和所有契約差三千口，不能共用一個數字。"""
+    scope = PAGE_SCOPE if scope is None else scope
+    if scope == "front" and key in ("top10_trader", "top10_specific"):
+        return prices["baselines"][key + "_front"]
+    return prices["baselines"][key]
+
+
+BASE = {k: base_of(k) for k in
+        ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]}
+print("Python 端：基準點取自 %s（口徑 %s）→ %s"
+      % (BASE_DATE, PAGE_SCOPE,
+         "、".join("%s=%s" % (k, format(v, ",")) for k, v in BASE.items())))
+
+
+def sgn(x):
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+
+def score(c, base=None):
+    """剩餘口數模式：每一票看離自己的基準多遠，上面 +1、下面 -1、相等 0。"""
+    b = BASE if base is None else base
+    v = [sgn(c["foreign_fut"] - b["foreign_fut"]),
+         sgn(c["top10_trader"] - b["top10_trader"]),
+         sgn(c["top10_specific"] - b["top10_specific"]),
+         sgn(c["foreign_opt"] - b["foreign_opt"]),
+         sgn(c["dealer_opt"] - b["dealer_opt"])]
+    return v, v[0] + v[1] + v[2], v[3] + v[4], sum(v)
+
+
+exp = [score(c) for c in chips]
+
+# 定義上的不變量：基準取自 BASE_DATE，那一天的五票必然全部是 0、總分 0。
+# 這一條比任何數值比對都強——它直接釘住「基準點就是那一天的值」這件事。
+_bi = next((i for i, c in enumerate(chips) if c["date"] == BASE_DATE), None)
+if _bi is None:
+    print("❌ chips 裡找不到 %s" % BASE_DATE)
+    sys.exit(1)
+if exp[_bi][0] != [0, 0, 0, 0, 0] or exp[_bi][3] != 0:
+    print("❌ Python 端：基準日 %s 的五票應該全部是 0，實得 %s" % (BASE_DATE, exp[_bi]))
+    sys.exit(1)
+print("Python 端：基準日 %s 的五票全部是 0（定義上的不變量）" % BASE_DATE)
 
 
 # ---------- 1c. Python 端獨立重算三種計分模式 ----------
 # 這裡刻意用和 app.js 不同的寫法（不共用任何程式碼），才驗得出東西。
 KEYS = ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]
-ZERO_CENTERED = {"top10_trader", "top10_specific", "dealer_opt"}
 
 
 def _median(a):
@@ -81,7 +131,7 @@ def _curve(u, name, k):
     return math.tanh(u / k) * 0.5
 
 
-def score_modes(series, mode, thr, window, curve_name, curve_k):
+def score_modes(series, mode, base, window, curve_name, curve_k):
     """series 是 [{key: value}] 的全部歷史；回傳每天的 total（算不出來給 None）。"""
     out = []
     for i, row in enumerate(series):
@@ -91,8 +141,9 @@ def score_modes(series, mode, thr, window, curve_name, curve_k):
             if x is None:
                 ok = False
                 break
+            b = base[key]
             if mode == "level":
-                votes.append(1 if x > (thr if key == "foreign_fut" else 0) else -1)
+                votes.append(1 if x > b else (-1 if x < b else 0))
                 continue
             if i == 0:
                 ok = False
@@ -106,19 +157,26 @@ def score_modes(series, mode, thr, window, curve_name, curve_k):
                 break
             lw = [series[g][key] for g in range(i - window, i)]
             dw = [series[g][key] - series[g - 1][key] for g in range(i - window, i)]
-            center = 0 if key in ZERO_CENTERED else _median(lw)
+            # 中性點＝這一票的基準點，和剩餘口數模式同一組數字（不再有分欄例外）
             s_lv, s_fl = _mad(lw), _mad(dw, 0)
             if not (s_lv > 0 and s_fl > 0):
                 ok = False
                 break
-            votes.append(_curve((x - center) / s_lv, curve_name, curve_k)
+            votes.append(_curve((x - b) / s_lv, curve_name, curve_k)
                          + _curve(d / s_fl, curve_name, curve_k))
         out.append(sum(votes) if ok else None)
     return out
 
+# 把第 1 票的基準往上挪 2,000 口，當成「使用者手動調過」的那一組，
+# 用來驗統計卡的「vs 預設基準 N 天不同」。挑 2,000 是因為它確實會翻掉幾天。
+ALT_BASE = dict(BASE)
+ALT_BASE["foreign_fut"] = BASE["foreign_fut"] + 2000
+exp_alt = [score(c, ALT_BASE) for c in chips]
 diff_days = [chips[i]["date"] for i in range(len(chips))
-             if exp[-83000][i][3] != exp[-80000][i][3]]
-print("Python 端：-83000 vs -80000 總分不同的天數 =", len(diff_days), diff_days)
+             if exp[i][3] != exp_alt[i][3]]
+print("Python 端：第 1 票基準 %s → %s，總分不同的天數 = %d %s"
+      % (format(BASE["foreign_fut"], ","), format(ALT_BASE["foreign_fut"], ","),
+         len(diff_days), diff_days))
 
 # ---------- 1b. Python 端獨立算 MA 與乖離率 ----------
 MA_PERIOD = prices.get("maPeriod", 20)
@@ -189,22 +247,82 @@ with sync_playwright() as pw:
             "#dataTable tbody tr",
             "rs => rs.map(r => Array.from(r.cells).map(c => c.textContent.trim()))")
 
-    def set_thr(v):
-        pg.eval_on_selector("#thrNum",
-            "(el,v)=>{el.value=v; el.dispatchEvent(new Event('input',{bubbles:true}));}", str(v))
+    # 介面一：把某一票的基準點直接打進那一列的數字框
+    def set_base(key, v):
+        pg.evaluate(
+            """([k, v]) => {
+                 const row = [...document.querySelectorAll('#baseRows .base-row')]
+                               .find(r => r.dataset.key === k);
+                 if (!row) throw new Error('找不到 ' + k + ' 那一列');
+                 const n = row.querySelector('.base-num');
+                 n.value = String(v);
+                 n.dispatchEvent(new Event('input', {bubbles: true}));
+               }""", [key, v])
         pg.wait_for_timeout(120)
+
+    # 介面二：從日期選單挑一天，五票的基準一次換掉
+    def set_base_date(date):
+        pg.evaluate(
+            """(d) => { const s = document.getElementById('baseDateSel');
+                        s.value = d;
+                        s.dispatchEvent(new Event('change', {bubbles: true})); }""", date)
+        pg.wait_for_timeout(150)
+
+    def base_ui():
+        return pg.evaluate("""() => ({
+            rows: [...document.querySelectorAll('#baseRows .base-row')].map(r => {
+              const rng = r.querySelector('.base-range'), n = r.querySelector('.base-num');
+              return { key: r.dataset.key,
+                       label: r.querySelector('.base-label').textContent,
+                       range: Number(rng.value), num: Number(n.value),
+                       min: Number(rng.min), max: Number(rng.max),
+                       presets: [...r.querySelectorAll('.base-preset')]
+                                  .map(b => ({v: Number(b.dataset.v), on: b.classList.contains('on')})),
+                       now: r.querySelector('.base-now').textContent };
+            }),
+            sel: document.getElementById('baseDateSel').value,
+            options: [...document.getElementById('baseDateSel').options]
+                       .map(o => ({v: o.value, text: o.textContent, disabled: o.disabled})),
+            note: document.getElementById('baseNote').textContent,
+            diffNote: document.getElementById('baseDiffNote').textContent
+          })""")
 
     # 主要比對要涵蓋全部歷史，所以先切到「全部」。
     # （預設視窗是 60 天，歷史比 60 天長的時候表格只會有 60 列。）
-    pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
-                            .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
+    pg.evaluate(WIN_ALL_JS)
     pg.wait_for_timeout(150)
 
-    results = {}
-    for thr in (-83000, -80000):
-        set_thr(thr)
-        results[thr] = read_table()
-        results[str(thr) + "_opt"] = pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+    results, base_ui_state = {}, {}
+
+    def grab(case):
+        results[case] = read_table()
+        results[case + "_opt"] = pg.evaluate(
+            "JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+        base_ui_state[case] = base_ui()
+
+    # default 這一組刻意「什麼都不動」地擷取。碰過控制項再擷取是不行的：
+    # 那驗不到「頁面一打開就是 config 那組基準、選單停在預設那天」，
+    # 而那正是這個功能最容易壞掉的地方。
+    grab("default")
+    # alt = 把第 1 票的基準往上挪 2,000 口
+    set_base("foreign_fut", ALT_BASE["foreign_fut"])
+    grab("alt")
+    set_base("foreign_fut", BASE["foreign_fut"])
+
+    # 介面二：挑一個不是預設的日期，五票的基準應該一次全換
+    _pick_base_date = chips[len(chips) // 3]["date"]
+    set_base_date(_pick_base_date)
+    base_ui_state["bydate"] = base_ui()
+    base_bydate_opt = pg.evaluate(
+        "JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+    base_bydate_table = read_table()
+    base_bydate_header = pg.eval_on_selector(
+        "#dataTable thead", "e => e.textContent")
+
+    # 按「重設為預設」要回到 site.json 那一組，而且選單要回到預設那一天
+    pg.eval_on_selector("#baseReset", "e => e.click()")
+    pg.wait_for_timeout(150)
+    base_ui_state["reset"] = base_ui()
 
     # 表單元件在「深色系統主題」下的可讀性（白字白底 bug 的回歸測試）
     CONTRAST_JS = """
@@ -238,7 +356,7 @@ with sync_playwright() as pw:
     pg.emulate_media(color_scheme="light")
 
     err_visible = pg.eval_on_selector("#loadErr", "e => !e.hidden")
-    thr_note = pg.eval_on_selector("#thrNote", "e => e.textContent")
+    base_diff_note = base_ui_state["alt"]["diffNote"]
     stats = pg.eval_on_selector_all(".stat", "ns => ns.map(n => n.textContent.trim())")
 
     # 比較模式也切一次，確認不會爆
@@ -249,9 +367,9 @@ with sync_playwright() as pw:
     # 關掉比較模式，改測「勾選狀態改變 + 非預設門檻」時副圖兩軸還對不對得齊
     pg.eval_on_selector("#compareChk", "e=>{e.checked=false;e.dispatchEvent(new Event('change',{bubbles:true}));}")
     toggle_cases = []
-    for off, thr in ((["top10_trader", "top10_specific"], -86000),
-                     (["foreign_opt", "dealer_opt", "top10_specific"], -79000),
-                     ([], -90500)):
+    for off, fut in ((["top10_trader", "top10_specific"], BASE["foreign_fut"] - 3000),
+                     (["foreign_opt", "dealer_opt", "top10_specific"], BASE["foreign_fut"] + 2000),
+                     ([], BASE["foreign_fut"] - 9500)):
         pg.evaluate(
             """(names) => {
                  // 只動五票那五個；最後那個「大盤融資維持率」不投票，另外測
@@ -266,8 +384,8 @@ with sync_playwright() as pw:
                    if (cb.checked !== want) { cb.checked = want; cb.dispatchEvent(new Event('change',{bubbles:true})); }
                  });
                }""", off)
-        set_thr(thr)
-        toggle_cases.append((off, thr,
+        set_base("foreign_fut", fut)
+        toggle_cases.append((off, fut,
             pg.evaluate("JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")))
 
     # 區間切換：切到「最近 20 日」應該只剩 20 列，
@@ -289,7 +407,7 @@ with sync_playwright() as pw:
     pg.wait_for_timeout(150)
 
     # tooltip 實際輸出（formatter 是函式，JSON 序列化會掉，所以在頁面裡直接呼叫）
-    set_thr(-83000)
+    set_base("foreign_fut", BASE["foreign_fut"])
     tips = pg.evaluate(
         """(idxs) => { const o = window.__OPTS__[window.__OPTS__.length-1];
                        return idxs.map(i => o.tooltip.formatter([{dataIndex: i}])); }""",
@@ -329,7 +447,7 @@ with sync_playwright() as pw:
 
     pg.goto("file://" + os.path.join(_p2, "index.html"))
     pg.wait_for_selector("#dataTable tbody tr")
-    set_thr(-83000)
+    set_base("foreign_fut", BASE["foreign_fut"])
     scope_ready = pg.evaluate(
         """() => [...document.querySelectorAll('#scopeSeg button')]
                  .map(b => ({label: b.textContent, disabled: b.disabled,
@@ -351,8 +469,8 @@ with sync_playwright() as pw:
                             .find(x => x.dataset.scope === 'all'); if (b) b.click(); }""")
     pg.evaluate("""() => { const b = [...document.querySelectorAll('#winSeg button')]
                             .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
-    set_thr(-83000)
-    mode_series, mode_thr_disabled = {}, {}
+    set_base("foreign_fut", BASE["foreign_fut"])
+    mode_series = {}
     for _m in ("level", "flow", "blend"):
         pg.evaluate("""(k) => { const b = [...document.querySelectorAll('#modeSeg button')]
                                 .find(x => x.dataset.mode === k); if (b) b.click(); }""", _m)
@@ -361,7 +479,6 @@ with sync_playwright() as pw:
             """() => { const o = window.__OPTS__[window.__OPTS__.length-1];
                        const s = o.series.find(x => x.name === '五票總分');
                        return s ? s.data : null; }""")
-        mode_thr_disabled[_m] = pg.eval_on_selector("#thrNum", "e => e.disabled")
     mode_table_blend = read_table()
     mode_note_blend = pg.eval_on_selector("#modeNote", "e => e.textContent")
     pg.evaluate("""() => { const b = [...document.querySelectorAll('#modeSeg button')]
@@ -535,8 +652,8 @@ with sync_playwright() as pw:
           ser: ser && { y: ser.yAxisIndex, x: ser.xAxisIndex, type: ser.type,
                         dash: ser.lineStyle && ser.lineStyle.type,
                         connect: ser.connectNulls, data: ser.data },
-          axisShown: o.yAxis[4] ? o.yAxis[4].show : null,
-          axisName: o.yAxis[4] ? o.yAxis[4].name : null,
+          axisShown: o.yAxis[3] ? o.yAxis[3].show : null,
+          axisName: o.yAxis[3] ? o.yAxis[3].name : null,
           gridRight: o.grid.map(g => g.right),
           legend: o.legend[1].data,
           votes: o.series.filter(s => s.xAxisIndex === 1 && s.name
@@ -578,62 +695,62 @@ with sync_playwright() as pw:
     _sh.rmtree(_tmp, ignore_errors=True)
 
 # ---------- 3. 比對 ----------
-SMALL_KEYS = ["top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]
 
 
-def check_sub_axes(opt, thr, small_keys, tag):
-    """副圖雙軸：右軸的門檻必須和左軸的 0 落在同一個高度，且兩軸格線重疊。"""
+def check_sub_axis(opt, tag):
+    """副圖只有一根軸，畫的是偏離基準的量，0 線就是五票共同的分界。
+
+    原本這裡驗的是雙軸對齊（右軸門檻要和左軸 0 落在同一條格線）。五票各有基準
+    之後那套機器拿掉了，要驗的變成：
+      * 只有一根口數軸，min/max/interval 都寫死（不 auto-scale，否則 0 的位置會跳）
+      * 0 落在某一條格線上，而不是夾在格子中間
+      * 軸範圍涵蓋得住真正畫出來的資料
+      * 五條線都掛在這一根軸上，而且畫的是「值 − 自己的基準」
+      * 0 線（__sub_guide 的 markLine）還在
+    """
     bad = []
-    yl, yr = opt["yAxis"][2], opt["yAxis"][3]
-    for ax, nm in ((yl, "副圖左軸"), (yr, "副圖右軸")):
-        for key in ("min", "max", "interval"):
-            if ax.get(key) is None:
-                bad.append("%s %s 沒有設 %s（沒設就會各自 auto-scale，對不齊）" % (tag, nm, key))
-                return bad
-        if ax.get("scale"):
-            bad.append("%s %s 不該再開 scale" % (tag, nm))
+    y = opt["yAxis"][2]
+    for key in ("min", "max", "interval"):
+        if y.get(key) is None:
+            bad.append("%s 副圖軸沒有設 %s（auto-scale 的話 0 的位置會跟著資料跳）"
+                       % (tag, key))
+            return bad
+    if y.get("scale"):
+        bad.append("%s 副圖軸不該再開 scale" % tag)
+    if not (y["min"] <= 0 <= y["max"]):
+        bad.append("%s 副圖軸沒有包含 0（[%s, %s]）" % (tag, y["min"], y["max"]))
 
-    fl = (0 - yl["min"]) / (yl["max"] - yl["min"])          # 左軸 0 的相對高度
-    fr = (thr - yr["min"]) / (yr["max"] - yr["min"])        # 右軸門檻的相對高度
-    if abs(fl - fr) > 1e-9:
-        bad.append("%s 對齊失敗：左軸 0 在 %.6f，右軸門檻在 %.6f" % (tag, fl, fr))
+    n = (y["max"] - y["min"]) / y["interval"]
+    if abs(n - round(n)) > 1e-9:
+        bad.append("%s 副圖軸段數不是整數：%.3f" % (tag, n))
+    k = (0 - y["min"]) / y["interval"]
+    if abs(k - round(k)) > 1e-9:
+        bad.append("%s 副圖的 0 沒有落在格線上（由下往上第 %.3f 條）" % (tag, k))
 
-    nl = (yl["max"] - yl["min"]) / yl["interval"]
-    nr = (yr["max"] - yr["min"]) / yr["interval"]
-    if abs(nl - nr) > 1e-9:
-        bad.append("%s 兩軸段數不同（%.3f vs %.3f），格線不會重疊" % (tag, nl, nr))
-    if abs(nl - round(nl)) > 1e-9:
-        bad.append("%s 段數不是整數：%.3f" % (tag, nl))
-    # 對齊線必須落在某條格線上（而不是格子中間）
-    if abs(fl * nl - round(fl * nl)) > 1e-9:
-        bad.append("%s 對齊線沒有落在格線上" % tag)
+    vals = []
+    for ser in opt["series"]:
+        if ser.get("yAxisIndex") != 2 or ser.get("type") != "line":
+            continue
+        if not ser.get("name") or ser["name"].startswith("__"):
+            continue
+        vals += [v for v in ser.get("data", []) if v is not None]
+    if vals and (y["min"] > min(vals) or y["max"] < max(vals)):
+        bad.append("%s 副圖軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
+                   % (tag, y["min"], y["max"], min(vals), max(vals)))
 
-    # 資料不能被切掉。範圍要從「這張圖真正畫出來的序列」取——
-    # 拿整份歷史來比會誤判：視窗只顯示最近 N 天，軸本來就只需要涵蓋那一段。
-    def axis_vals(idx):
-        out = []
-        for ser in opt["series"]:
-            if ser.get("yAxisIndex") != idx or ser.get("type") != "line":
-                continue
-            if not ser.get("name") or ser["name"].startswith("__"):
-                continue
-            out += [v for v in ser.get("data", []) if v is not None]
-        return out
-
-    sv = axis_vals(2)
-    if sv and (yl["min"] > min(sv) or yl["max"] < max(sv)):
-        bad.append("%s 左軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
-                   % (tag, yl["min"], yl["max"], min(sv), max(sv)))
-    fv = axis_vals(3)
-    if fv and (yr["min"] > min(fv) or yr["max"] < max(fv)):
-        bad.append("%s 右軸切到資料：軸 [%s, %s] vs 資料 [%s, %s]"
-                   % (tag, yr["min"], yr["max"], min(fv), max(fv)))
+    # 五票全部在同一根軸上，沒有誰還掛在別的軸
+    chip_lines = [s for s in opt["series"]
+                  if s.get("xAxisIndex") == 1 and s.get("name")
+                  and not s["name"].startswith("__") and s["name"] != "大盤融資維持率"]
+    off_axis = [s["name"] for s in chip_lines if s.get("yAxisIndex") != 2]
+    if off_axis:
+        bad.append("%s 這幾條沒有和其他票共用副圖軸：%s" % (tag, off_axis))
 
     g = [s for s in opt["series"] if s.get("name") == "__sub_guide"]
     if not g:
-        bad.append("%s 副圖少了對齊基準線 __sub_guide" % tag)
+        bad.append("%s 副圖少了 0 基準線 __sub_guide" % tag)
     elif g[0].get("yAxisIndex") != 2 or g[0]["markLine"]["data"][0].get("yAxis") != 0:
-        bad.append("%s 對齊基準線沒有畫在左軸 0" % tag)
+        bad.append("%s 0 基準線沒有畫在副圖軸的 0" % tag)
     return bad
 
 
@@ -647,99 +764,100 @@ if real_errors:
 
 price_by_date = {r["date"]: r for r in prices["stocks"][0]["rows"]}
 
-for thr in (-83000, -80000):
-    tbl = results[thr]
+exps = {"default": exp, "alt": exp_alt}
+for case in ("default", "alt"):
+    tbl = results[case]
     shown = [r[0].split()[0] for r in tbl]
     if shown != sorted(shown, reverse=True):
-        fails.append("thr=%s 逐日明細不是由新到舊排序：開頭 %s" % (thr, shown[:3]))
+        fails.append("基準[%s] 逐日明細不是由新到舊排序：開頭 %s" % (case, shown[:3]))
     if shown and shown[0] != chips[-1]["date"]:
-        fails.append("thr=%s 表格第一列應該是最新的 %s，實得 %s"
-                     % (thr, chips[-1]["date"], shown[0]))
+        fails.append("基準[%s] 表格第一列應該是最新的 %s，實得 %s"
+                     % (case, chips[-1]["date"], shown[0]))
     tbl = tbl[::-1]          # 之後的逐格比對沿用「由舊到新」的索引
     if len(tbl) != len(chips):
-        fails.append("thr=%s 表格列數 %d != %d" % (thr, len(tbl), len(chips)))
+        fails.append("基準[%s] 表格列數 %d != %d" % (case, len(tbl), len(chips)))
         continue
     for i, row in enumerate(tbl):
-        v, fut, opt, tot = exp[thr][i]
+        v, fut, opt, tot = exps[case][i]
         d = chips[i]["date"]
         # 欄位：日期, 收盤, 漲跌幅, (數值,票)x5, 期貨小計, 選擇權小計, 總分
         if not row[0].startswith(d):
-            fails.append("thr=%s 第%d列日期 %r != %s" % (thr, i, row[0], d))
+            fails.append("基準[%s] 第%d列日期 %r != %s" % (case, i, row[0], d))
         pr = price_by_date[d]
         want_close = "{:,.2f}".format(pr["close"])
         if row[1] != want_close:
-            fails.append("thr=%s %s 收盤 %r != %r" % (thr, d, row[1], want_close))
+            fails.append("基準[%s] %s 收盤 %r != %r" % (case, d, row[1], want_close))
         # 第一個交易日沒有漲跌價（來源就沒給），畫面應該顯示 — 而不是 0%
         if pr["change"] is None or (pr["close"] - pr["change"]) == 0:
             if row[2] != "—":
-                fails.append("thr=%s %s 沒有漲跌價，應該顯示 —，實得 %r" % (thr, d, row[2]))
+                fails.append("基準[%s] %s 沒有漲跌價，應該顯示 —，實得 %r" % (case, d, row[2]))
         else:
             want_pct = pr["change"] / (pr["close"] - pr["change"]) * 100
             got_pct = float(row[2].replace("%", "").replace("+", ""))
             if abs(got_pct - want_pct) > 0.011:
-                fails.append("thr=%s %s 漲跌幅 %r != %.2f%%" % (thr, d, row[2], want_pct))
+                fails.append("基準[%s] %s 漲跌幅 %r != %.2f%%" % (case, d, row[2], want_pct))
         # MA 與乖離率（跟著目前選中的股票，預設 2330）
         want_ma, want_bias = exp_bias[prices["stocks"][0]["code"]][d]
         if want_ma is None:
             if row[3] != "—" or row[4] != "—":
-                fails.append("thr=%s %s 均線不足時應顯示 —，卻是 %r / %r" % (thr, d, row[3], row[4]))
+                fails.append("基準[%s] %s 均線不足時應顯示 —，卻是 %r / %r" % (case, d, row[3], row[4]))
         else:
             got_ma = float(row[3].replace(",", ""))
             if abs(got_ma - want_ma) > 0.011:
-                fails.append("thr=%s %s MA %s != %.2f" % (thr, d, row[3], want_ma))
+                fails.append("基準[%s] %s MA %s != %.2f" % (case, d, row[3], want_ma))
             got_bias = float(row[4].replace("%", "").replace("+", ""))
             if abs(got_bias - want_bias) > 0.011:
-                fails.append("thr=%s %s 乖離率 %s != %.2f%%" % (thr, d, row[4], want_bias))
+                fails.append("基準[%s] %s 乖離率 %s != %.2f%%" % (case, d, row[4], want_bias))
 
         # 每個欄位三格：口數 / 本日操作 / 票
         for k, f in enumerate(["foreign_fut", "top10_trader", "top10_specific",
                                "foreign_opt", "dealer_opt"]):
             gv = row[5 + k * 3].replace(",", "")
             if int(gv) != chips[i][f]:
-                fails.append("thr=%s %s %s 口數 %s != %s" % (thr, d, f, gv, chips[i][f]))
+                fails.append("基準[%s] %s %s 口數 %s != %s" % (case, d, f, gv, chips[i][f]))
 
             gd = row[6 + k * 3].replace(",", "").replace("+", "")
             want_d = None if i == 0 else chips[i][f] - chips[i - 1][f]
             if want_d is None:
                 if gd != "—":
-                    fails.append("thr=%s 第一天 %s 本日操作應為 —，卻是 %r" % (thr, f, gd))
+                    fails.append("基準[%s] 第一天 %s 本日操作應為 —，卻是 %r" % (case, f, gd))
             elif int(gd) != want_d:
-                fails.append("thr=%s %s %s 本日操作 %s != %d" % (thr, d, f, gd, want_d))
+                fails.append("基準[%s] %s %s 本日操作 %s != %d" % (case, d, f, gd, want_d))
 
             gvote = int(row[7 + k * 3])
             if gvote != v[k]:
-                fails.append("thr=%s %s %s 票 %d != %d" % (thr, d, f, gvote, v[k]))
+                fails.append("基準[%s] %s %s 票 %d != %d" % (case, d, f, gvote, v[k]))
         if int(row[20]) != fut:
-            fails.append("thr=%s %s 期貨小計 %s != %d" % (thr, d, row[20], fut))
+            fails.append("基準[%s] %s 期貨小計 %s != %d" % (case, d, row[20], fut))
         if int(row[21]) != opt:
-            fails.append("thr=%s %s 選擇權小計 %s != %d" % (thr, d, row[21], opt))
+            fails.append("基準[%s] %s 選擇權小計 %s != %d" % (case, d, row[21], opt))
         if int(row[22]) != tot:
-            fails.append("thr=%s %s 總分 %s != %d" % (thr, d, row[22], tot))
+            fails.append("基準[%s] %s 總分 %s != %d" % (case, d, row[22], tot))
         if len(row) != 23:
-            fails.append("thr=%s %s 欄數 %d != 23" % (thr, d, len(row)))
+            fails.append("基準[%s] %s 欄數 %d != 23" % (case, d, len(row)))
 
     # 圖上的總分序列
-    o = results[str(thr) + "_opt"]
+    o = results[case + "_opt"]
     sser = [s for s in o["series"] if s.get("name") == "五票總分"][0]
-    if sser["data"] != [e[3] for e in exp[thr]]:
-        fails.append("thr=%s 圖表總分序列與預期不符" % thr)
+    if sser["data"] != [e[3] for e in exps[case]]:
+        fails.append("基準[%s] 圖表總分序列與預期不符" % case)
     if sser.get("step") != "middle":
         fails.append("總分不是 step line")
     ya = o["yAxis"][1]
     if (ya.get("min"), ya.get("max")) != (-5, 5):
         fails.append("總分軸範圍不是 -5~5")
     # 背景色塊：兩支滿格 bar，每天的顏色要對應總分正負
-    tots = [e[3] for e in exp[thr]]
+    tots = [e[3] for e in exps[case]]
     bgs = [s for s in o["series"] if str(s.get("name", "")).startswith("__bg_")]
     if len(bgs) != 2:
-        fails.append("thr=%s 背景 bar 序列數 %d != 2" % (thr, len(bgs)))
+        fails.append("基準[%s] 背景 bar 序列數 %d != 2" % (case, len(bgs)))
     for b in bgs:
         if b.get("barWidth") != "100%" or b.get("barCategoryGap") != "0%" or b.get("barGap") != "-100%":
             fails.append("背景 bar 沒有設成滿格（barWidth/barCategoryGap/barGap）")
         if b.get("z") != 0 or not b.get("silent"):
             fails.append("背景 bar 應該 z=0 且 silent")
         if len(b["data"]) != len(tots):
-            fails.append("thr=%s 背景 bar 天數 %d != %d" % (thr, len(b["data"]), len(tots)))
+            fails.append("基準[%s] 背景 bar 天數 %d != %d" % (case, len(b["data"]), len(tots)))
             continue
         for k, item in enumerate(b["data"]):
             col = item["itemStyle"]["color"]
@@ -748,8 +866,8 @@ for thr in (-83000, -80000):
                    "down" if "18,153,107" in col else
                    "none" if col == "transparent" else "?" + col)
             if got != want:
-                fails.append("thr=%s %s 背景色 %s != %s（總分 %d）"
-                             % (thr, chips[k]["date"], got, want, tots[k]))
+                fails.append("基準[%s] %s 背景色 %s != %s（總分 %d）"
+                             % (case, chips[k]["date"], got, want, tots[k]))
     if "markArea" in sser:
         fails.append("總分序列不該再有 markArea（category 軸座標會被取整）")
     ml = sser["markLine"]["data"]
@@ -771,31 +889,42 @@ for thr in (-83000, -80000):
         p0 = price_by_date[chips[0]["date"]]
         if first != [p0["open"], p0["close"], p0["low"], p0["high"]]:
             fails.append("K 棒 OHLC 順序不對：%s" % first)
-    # 副圖：foreign_fut 獨立 y 軸
+    # 副圖：五票共用一根軸，而且畫的是「值 − 自己的基準」
     chip_s = {s["name"]: s for s in o["series"]
               if s.get("xAxisIndex") == 1 and s.get("name") != "__sub_guide"
               and s.get("name") != "大盤融資維持率"}
     if len(chip_s) != 5:
         fails.append("副圖籌碼線（不含融資維持率）數量 %d != 5" % len(chip_s))
-    fa = chip_s.get("外資台指期未平倉", {}).get("yAxisIndex")
-    others = set(s["yAxisIndex"] for n, s in chip_s.items()
-                 if n not in ("外資台指期未平倉", "__sub_guide"))
-    if fa is None or others != {2} or fa != 3:
-        fails.append("foreign_fut 沒有用獨立 y 軸（fa=%s others=%s）" % (fa, others))
-    fails += check_sub_axes(o, thr, SMALL_KEYS, "thr=%s" % thr)
+    _case_base = BASE if case == "default" else ALT_BASE
+    _label_of = {"foreign_fut": "外資台指期未平倉",
+                 "top10_trader": "前十大交易人", "top10_specific": "前十大特定人",
+                 "foreign_opt": "選擇權外資淨口數", "dealer_opt": "選擇權自營商淨口數"}
+    for _k, _nm in _label_of.items():
+        _ser = next((v for n, v in chip_s.items() if n.startswith(_nm)), None)
+        if _ser is None:
+            fails.append("基準[%s] 副圖找不到 %s 那條線（有 %s）"
+                         % (case, _nm, sorted(chip_s)))
+            continue
+        _want = [c[_k] - _case_base[_k] for c in chips]
+        if _ser.get("data") != _want:
+            _bad = [(i, a, b2) for i, (a, b2) in
+                    enumerate(zip(_ser["data"], _want)) if a != b2][:3]
+            fails.append("基準[%s] %s 的副圖數列不是「值 − 基準 %s」，前幾個差異 %s"
+                         % (case, _nm, format(_case_base[_k], ","), _bad))
+    fails += check_sub_axis(o, "基準[%s]" % case)
 
 # 門檻差異天數
-m = re.search(r"總分不同的有\s*(\d+)\s*天", thr_note)
+m = re.search(r"總分不同的有\s*(\d+)\s*天", base_diff_note)
 if not m or int(m.group(1)) != len(diff_days):
-    fails.append("門檻比較說明的天數與 Python 算的不符：%r" % thr_note)
+    fails.append("基準比較說明的天數與 Python 算的不符：%r" % base_diff_note)
 # 日期太多時畫面刻意不逐一列出（改叫人看表格），只有 12 天以內才逐日比對
 if len(diff_days) <= 12:
     for d in diff_days:
-        if d not in thr_note:
+        if d not in base_diff_note:
             fails.append("門檻比較說明沒列出 %s" % d)
-elif "請看下方表格" not in thr_note:
+elif "請看下方表格" not in base_diff_note:
     fails.append("差異有 %d 天（超過 12），說明應該改成請看表格，實得：%r"
-                 % (len(diff_days), thr_note[:120]))
+                 % (len(diff_days), base_diff_note[:120]))
 
 if cmp_opt is None or not any(s.get("type") == "line" and s.get("yAxisIndex") == 0
                               for s in cmp_opt["series"]):
@@ -811,10 +940,10 @@ else:
     if len(set(colors)) != len(colors):
         fails.append("比較模式有重複的線色：%s" % colors)
 
-for off, thr, opt in toggle_cases:
-    fails += check_sub_axes(opt, thr, [k for k in SMALL_KEYS if k not in off],
-                            "關掉%s @門檻%s" % (off or ["無"], thr))
-print("副圖雙軸對齊：%d 種門檻/勾選組合皆通過" % (2 + len(toggle_cases)))
+for off, fut, opt in toggle_cases:
+    fails += check_sub_axis(opt, "關掉%s @第1票基準%s" % (off or ["無"], fut))
+print("副圖單軸（偏離基準）：%d 種基準/勾選組合皆通過，0 都落在格線上"
+      % (2 + len(toggle_cases)))
 
 # 區間切換
 w20, wall = win_cases[20], win_cases[0]
@@ -840,25 +969,35 @@ if len(chips) > 20:
 print("區間切換：全部 %d 列 / 最近 20 日 %d 列，切窗後第一列仍與歷史前一日相比"
       % (wall["rows"], w20["rows"]))
 
-# tooltip：口數與票數之間要出現「本日操作」，順序不能跑掉
+# tooltip：口數 → 偏離基準 → 本日操作 → 票，四格依序出現，順序不能跑掉。
+# 「偏離基準」是後來加的，而且是必要的：票投幾分現在取決於它，
+# 卡片上只給絕對口數的話，看到 +1 根本不知道為什麼。
 import html as _html
 for idx, tip in zip([0, 5, 20], tips):
     txt = re.sub(r"<[^>]+>", "|", tip)
     txt = _html.unescape(txt)
-    if "本日操作" not in tip:
-        fails.append("tooltip(第%d天) 沒有本日操作欄" % idx)
-    for f in ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]:
+    for word in ("本日操作", "偏離基準"):
+        if word not in tip:
+            fails.append("tooltip(第%d天) 沒有「%s」欄" % (idx, word))
+    for f in KEYS:
         val = "{:,}".format(chips[idx][f])
+        dev = chips[idx][f] - BASE[f]
+        want_dev = "{}{:,}".format("+" if dev > 0 else "", dev)
         want = "—" if idx == 0 else "{}{:,}".format("+" if chips[idx][f] > chips[idx-1][f] else "",
                                                    chips[idx][f] - chips[idx-1][f])
-        # 口數 → 本日操作 → 票，三者必須依序出現
+        # 口數 → 偏離基準 → 本日操作，三者必須依序出現
         p_val = txt.find("|" + val + "|")
-        p_dlt = txt.find("|" + want + "|", p_val if p_val >= 0 else 0)
+        p_dev = txt.find("|" + want_dev + "|", p_val if p_val >= 0 else 0)
+        p_dlt = txt.find("|" + want + "|", p_dev if p_dev >= 0 else 0)
         if p_val < 0:
             fails.append("tooltip(第%d天) 找不到 %s 的口數 %s" % (idx, f, val))
+        elif p_dev < 0:
+            fails.append("tooltip(第%d天) %s 的偏離基準 %s 沒有緊接在口數後面（基準 %s）"
+                         % (idx, f, want_dev, format(BASE[f], ",")))
         elif p_dlt < 0:
-            fails.append("tooltip(第%d天) %s 的本日操作 %s 沒有緊接在口數後面" % (idx, f, want))
-print("tooltip：口數 → 本日操作 → 票 的順序與數值正確（第 1／6／21 天）")
+            fails.append("tooltip(第%d天) %s 的本日操作 %s 沒有接在偏離基準後面"
+                         % (idx, f, want))
+print("tooltip：口數 → 偏離基準 → 本日操作 → 票 的順序與數值正確（第 1／6／21 天）")
 
 # tooltip 只放籌碼：票數要在最上面，個股的行情與乖離率不應該出現在這裡。
 # （那些在下方的逐日明細表格裡查得到；把六檔股票塞進這張卡片會把五票擠下去。）
@@ -891,6 +1030,126 @@ for idx, tip in zip([0, 5, 20], tips):
         fails.append("tooltip(%s) 總分跑到五票前面了" % d)
 print("tooltip：只剩籌碼——票數緊接在日期之後，個股行情與乖離率已移除，小計/總分在最後")
 
+# ---------- 基準點的兩個設定介面 ----------
+# 這一節驗的是「兩個介面共用同一份基準、而且互相反映」。
+# 最容易出錯的是它們各自記一份：拉過滑桿之後選單還顯示某一天，
+# 或換了日期之後滑桿沒跟著動——畫面上看起來都正常，但你以為在看的那組基準是錯的。
+_bu = base_ui_state["default"]
+if len(_bu["rows"]) != 5:
+    fails.append("介面一應該是五票各一列，實得 %d 列" % len(_bu["rows"]))
+else:
+    for _r in _bu["rows"]:
+        _want = BASE[_r["key"]]
+        if _r["num"] != _want:
+            fails.append("%s 的數字框是 %s，應該是基準 %s" % (_r["key"], _r["num"], _want))
+        if _r["range"] != _want:
+            fails.append("%s 的滑桿是 %s，應該和數字框同步在 %s"
+                         % (_r["key"], _r["range"], _want))
+        # 滑桿範圍要包得住整段歷史，不然新資料一跑出範圍就拉不到
+        _col = _r["key"]
+        if PAGE_SCOPE == "front" and _col in ("top10_trader", "top10_specific"):
+            _col += "_front"
+        _vals = [c[_col] for c in RAW_CHIPS if c[_col] is not None]
+        if _r["min"] > min(_vals) or _r["max"] < max(_vals):
+            fails.append("%s 的滑桿範圍 [%s, %s] 包不住歷史 [%s, %s]"
+                         % (_r["key"], _r["min"], _r["max"], min(_vals), max(_vals)))
+        if _r["min"] > _want or _r["max"] < _want:
+            fails.append("%s 的滑桿範圍包不住自己的基準 %s" % (_r["key"], _want))
+        if "最新" not in _r["now"] or "偏離" not in _r["now"]:
+            fails.append("%s 那一列應該顯示最新口數與偏離，實得 %r" % (_r["key"], _r["now"]))
+
+# config.json 的 baselinePresets 要變成快捷按鈕
+_presets = prices.get("baselinePresets", {})
+for _k, _vs in _presets.items():
+    _row = next((r for r in _bu["rows"] if r["key"] == _k), None)
+    if _row is None:
+        fails.append("baselinePresets 設了 %s，但沒有那一列" % _k)
+        continue
+    if [p["v"] for p in _row["presets"]] != list(_vs):
+        fails.append("%s 的快捷按鈕 %s != config 的 %s"
+                     % (_k, [p["v"] for p in _row["presets"]], _vs))
+if not _presets:
+    fails.append("config.json 的 baselinePresets 是空的，這一段就沒驗到東西")
+
+# 介面二：選單預設停在 config 的 baselineDate，而且每個交易日都要在裡面
+if _bu["sel"] != BASE_DATE:
+    fails.append("日期選單預設應該停在 %s，實得 %r" % (BASE_DATE, _bu["sel"]))
+_opt_dates = [o["v"] for o in _bu["options"] if o["v"]]
+if _opt_dates != [c["date"] for c in reversed(chips)]:
+    fails.append("日期選單應該列出全部交易日、新的在上面（%d 個，實得 %d 個）"
+                 % (len(chips), len(_opt_dates)))
+if not any(o["v"] == "" for o in _bu["options"]):
+    fails.append("日期選單少了「自訂」那一項")
+if "（預設）" not in next(o["text"] for o in _bu["options"] if o["v"] == BASE_DATE):
+    fails.append("選單裡 %s 應該標成（預設）" % BASE_DATE)
+if BASE_DATE not in _bu["note"]:
+    fails.append("說明應該寫出基準來自哪一天，實得 %r" % _bu["note"])
+
+# 拉過滑桿（介面一）之後，選單要變成「自訂」——不能還顯示某一天
+_alt_ui = base_ui_state["alt"]
+if _alt_ui["sel"] != "":
+    fails.append("手動調過基準之後，日期選單應該變成「自訂」，實得 %r" % _alt_ui["sel"])
+if "手動調過" not in _alt_ui["note"]:
+    fails.append("手動調過之後說明要講清楚，實得 %r" % _alt_ui["note"])
+_alt_row = next(r for r in _alt_ui["rows"] if r["key"] == "foreign_fut")
+if _alt_row["num"] != ALT_BASE["foreign_fut"] or _alt_row["range"] != ALT_BASE["foreign_fut"]:
+    fails.append("改了數字框之後滑桿沒跟著動：%s" % _alt_row)
+for _r in _alt_ui["rows"]:
+    if _r["key"] == "foreign_fut":
+        continue
+    if _r["num"] != BASE[_r["key"]]:
+        fails.append("只改第 1 票，%s 的基準不該跟著變：%s" % (_r["key"], _r["num"]))
+
+# 介面二：換一天 → 五票的基準一次全換成那天的剩餘口數
+_bd = base_ui_state["bydate"]
+_bd_row = next(c for c in RAW_CHIPS if c["date"] == _pick_base_date)
+_want_bd = {}
+for _k in KEYS:
+    _col = _k
+    if PAGE_SCOPE == "front" and _k in ("top10_trader", "top10_specific"):
+        _col += "_front"
+    _want_bd[_k] = _bd_row[_col]
+if _bd["sel"] != _pick_base_date:
+    fails.append("選了 %s，選單應該停在那天，實得 %r" % (_pick_base_date, _bd["sel"]))
+for _r in _bd["rows"]:
+    if _r["num"] != _want_bd[_r["key"]]:
+        fails.append("選了 %s 之後 %s 的基準是 %s，應該是那天的 %s"
+                     % (_pick_base_date, _r["key"], _r["num"], _want_bd[_r["key"]]))
+# 而且副圖、表格、總分都要跟著換
+_bd_tots = [v for v in
+            [s["data"] for s in base_bydate_opt["series"] if s.get("name") == "五票總分"][0]]
+_bd_want = [score(c, _want_bd)[3] for c in chips]
+if _bd_tots != _bd_want:
+    fails.append("換基準日之後總分序列和 Python 重算不符，前幾個 %s vs %s"
+                 % (_bd_tots[:6], _bd_want[:6]))
+# 不變量：基準取自哪一天，那一天的總分就是 0
+_bd_i = next(i for i, c in enumerate(chips) if c["date"] == _pick_base_date)
+if _bd_tots[_bd_i] != 0:
+    fails.append("基準取自 %s，那天的總分應該是 0，實得 %s"
+                 % (_pick_base_date, _bd_tots[_bd_i]))
+_bd_tbl = base_bydate_table[::-1]
+if int(_bd_tbl[_bd_i][22]) != 0:
+    fails.append("表格裡 %s 那一列的總分也應該是 0，實得 %r"
+                 % (_pick_base_date, _bd_tbl[_bd_i][22]))
+# 表頭要標出各票的基準，不然表格裡的「票」為什麼是 +1 看不出來
+for _k, _v in _want_bd.items():
+    if format(_v, ",") not in base_bydate_header:
+        fails.append("表頭應該標出 %s 的基準 %s，實得 %r"
+                     % (_k, format(_v, ","), base_bydate_header[:200]))
+
+# 「重設為預設」要同時把五個滑桿和選單拉回 site.json 那一組
+_rs = base_ui_state["reset"]
+if _rs["sel"] != BASE_DATE:
+    fails.append("按了重設，選單應該回到 %s，實得 %r" % (BASE_DATE, _rs["sel"]))
+for _r in _rs["rows"]:
+    if _r["num"] != BASE[_r["key"]]:
+        fails.append("按了重設，%s 應該回到 %s，實得 %s"
+                     % (_r["key"], BASE[_r["key"]], _r["num"]))
+
+print("基準點兩個介面：五票各自滑桿＋數字框（範圍包得住全部歷史）、"
+      "日期選單一次換五票、兩者互相反映、重設回得去；"
+      "基準日那天的總分必然是 0")
+
 # ---------- 大盤融資維持率 ----------
 # 這一條的重點是「它不是第六票」。最容易出錯的方向是讓它影響到總分，
 # 或是把缺的日子當 0（0% 維持率看起來像有資料，但荒謬到沒有人會去懷疑那是缺值）。
@@ -909,8 +1168,8 @@ if not _mo["ser"]:
     fails.append("有 margin.csv 時副圖應該要有「大盤融資維持率」這條線")
 else:
     _s = _mo["ser"]
-    if _s["y"] != 4 or _s["x"] != 1:
-        fails.append("維持率應該畫在副圖（xAxisIndex 1）的第 5 根 y 軸，實得 x=%s y=%s"
+    if _s["y"] != 3 or _s["x"] != 1:
+        fails.append("維持率應該畫在副圖（xAxisIndex 1）的第 4 根 y 軸，實得 x=%s y=%s"
                      % (_s["x"], _s["y"]))
     if _s["type"] != "line":
         fails.append("維持率應該是折線，實得 %s" % _s["type"])
@@ -929,7 +1188,7 @@ else:
             fails.append("維持率缺值的位置不對：%s" % _nulls)
 
 if _mo["axisShown"] is not True:
-    fails.append("有維持率時第 5 根 y 軸要顯示，實得 show=%r" % _mo["axisShown"])
+    fails.append("有維持率時第 4 根 y 軸要顯示，實得 show=%r" % _mo["axisShown"])
 if _mo["axisName"] and "%" not in _mo["axisName"]:
     fails.append("維持率那根軸的名稱要標單位（%%），實得 %r" % _mo["axisName"])
 if _mo["votes"] != 5:
@@ -963,7 +1222,7 @@ if _tip_on.find("總分") > _tip_on.find("大盤融資維持率"):
 if margin_off["ser"]:
     fails.append("取消勾選後不該還有維持率那條線")
 if margin_off["axisShown"] is not False:
-    fails.append("取消勾選後第 5 根 y 軸要隱藏，實得 show=%r" % margin_off["axisShown"])
+    fails.append("取消勾選後第 4 根 y 軸要隱藏，實得 show=%r" % margin_off["axisShown"])
 if "大盤融資維持率" in margin_off["tip"]:
     fails.append("取消勾選後 tooltip 不該還有維持率那一行")
 if margin_off["total"] != _mo["total"]:
@@ -975,7 +1234,7 @@ if margin_off["votes"] != 5:
 if margin_absent["ser"]:
     fails.append("沒有 margin.csv 時不該畫出維持率那條線")
 if margin_absent["axisShown"] is not False:
-    fails.append("沒有 margin.csv 時第 5 根 y 軸要隱藏")
+    fails.append("沒有 margin.csv 時第 4 根 y 軸要隱藏")
 if "大盤融資維持率" in margin_absent["tip"]:
     fails.append("沒有 margin.csv 時 tooltip 不該提到維持率")
 if not margin_absent["cb"]:
@@ -992,7 +1251,7 @@ if margin_absent["gridRight"][0] != margin_off["gridRight"][0]:
     fails.append("沒有維持率時右邊距應該和取消勾選時一樣")
 
 print("大盤融資維持率：照日期對齊（%d 天有值、%d 天留空且線斷開）、"
-      "虛線獨立第 5 軸、不改變五票總分、沒有歷史檔時鎖住"
+      "虛線獨立右軸、不改變五票總分、沒有歷史檔時鎖住"
       % (len(_m_rows), len(_m_want) - len(_m_rows)))
 
 for scheme, items in contrast.items():
@@ -1033,23 +1292,30 @@ if _name_all not in scope_series["all"]:
 if _name_front not in scope_series["front"]:
     fails.append("近月模式下序列名稱應該標明口徑，實得 %s"
                  % sorted(scope_series["front"]))
-else:
+# 這份副本的 chips.csv 是故意把近月寫成所有契約的相反數，所以 build_site 解出來的
+# 基準點也是兩套：近月那兩個基準是所有契約那兩個的相反數。基準要跟著口徑換，
+# 這是這一節最重要的一條——拿近月的口數去比所有契約的基準，畫面上完全看不出來。
+_p2_base = next(r for r in _front if r["date"] == BASE_DATE)
+
+if _name_front in scope_series["front"]:
     _got = scope_series["front"][_name_front]
-    _want = [r["top10_trader_front"] for r in _front]
+    # 副圖畫的是「值 − 自己的基準」，所以期望值也要減掉近月的基準
+    _want = [r["top10_trader_front"] - _p2_base["top10_trader_front"] for r in _front]
     if _got != _want:
-        fails.append("切到近月之後，前十大交易人的數列沒有換成近月值："
-                     "前 3 筆 %s vs %s" % (_got[:3], _want[:3]))
+        fails.append("切到近月之後，前十大交易人的副圖數列不是「近月值 − 近月基準 %s」："
+                     "前 3 筆 %s vs %s"
+                     % (format(_p2_base["top10_trader_front"], ","), _got[:3], _want[:3]))
 
 # 分數也要跟著換——這才是切換真正的意義
 for _which, _k2, _k3 in (("all", "top10_trader", "top10_specific"),
                          ("front", "top10_trader_front", "top10_specific_front")):
     _want_total = []
     for r in _front:
-        v = [1 if r["foreign_fut"] > -83000 else -1,
-             1 if r[_k2] > 0 else -1,
-             1 if r[_k3] > 0 else -1,
-             1 if r["foreign_opt"] > 0 else -1,
-             1 if r["dealer_opt"] > 0 else -1]
+        v = [sgn(r["foreign_fut"] - _p2_base["foreign_fut"]),
+             sgn(r[_k2] - _p2_base[_k2]),
+             sgn(r[_k3] - _p2_base[_k3]),
+             sgn(r["foreign_opt"] - _p2_base["foreign_opt"]),
+             sgn(r["dealer_opt"] - _p2_base["dealer_opt"])]
         _want_total.append(sum(v))
     _got_total = scope_series[_which].get("五票總分")
     if _got_total != _want_total:
@@ -1058,7 +1324,8 @@ for _which, _k2, _k3 in (("all", "top10_trader", "top10_specific"),
 if scope_series["all"].get("五票總分") == scope_series["front"].get("五票總分"):
     fails.append("兩種口徑算出完全一樣的總分——這組測試資料是故意反號的，不可能相同，"
                  "切換多半沒有真的生效")
-print("口徑切換：未補齊時「近月」鎖住；補齊後可切，數列、序列名稱與五票總分都跟著換")
+print("口徑切換：未補齊時「近月」鎖住；補齊後可切，數列、序列名稱、"
+      "基準點（近月／所有契約各一份）與五票總分都跟著換")
 
 # ---------- 三種計分模式 ----------
 _W = prices.get("scoreWindow", 20)
@@ -1066,7 +1333,7 @@ _CV = prices.get("scoreCurve", "tanh")
 _CK = prices.get("scoreCurveK", 2.5)
 _series = [{k: c[k] for k in KEYS} for c in chips]      # 口徑 = 所有契約
 for _m, _label in (("level", "剩餘口數"), ("flow", "今日操作"), ("blend", "加權")):
-    want = score_modes(_series, _m, -83000, _W, _CV, _CK)
+    want = score_modes(_series, _m, BASE, _W, _CV, _CK)
     got = mode_series.get(_m)
     if got is None:
         fails.append("%s 模式找不到五票總分序列" % _label)
@@ -1095,12 +1362,6 @@ if _have.get("blend") != _n - _W - 1:
     fails.append("加權模式暖身 %d 天，應該剩 %d 天，實得 %s"
                  % (_W + 1, _n - _W - 1, _have.get("blend")))
 
-# 門檻只在模式 1 有效，其他模式要停用（不然會以為調了有用）
-if mode_thr_disabled.get("level"):
-    fails.append("剩餘口數模式下門檻不該被停用")
-if not mode_thr_disabled.get("flow") or not mode_thr_disabled.get("blend"):
-    fails.append("今日操作／加權模式下門檻應該停用，實得 %s" % mode_thr_disabled)
-
 # 加權模式的重點：曲線設定要真的生效。把同一份資料用 clamp2 再算一次，
 # 兩者必須不同——如果一樣，代表 config 的 scoreCurve 沒被讀到，或被寫死成 clamp。
 _blend = [v for v in (mode_series.get("blend") or []) if v is not None]
@@ -1108,7 +1369,7 @@ if not _blend:
     print("  [略過] 這份歷史只有 %d 天，暖身 %d 天之後沒有可比的加權分數；"
           "曲線相關的斷言在天數足夠的 repo 上才會執行" % (_n, _W + 1))
 else:
-    _alt = [v for v in score_modes(_series, "blend", -83000, _W, "clamp2", _CK) if v is not None]
+    _alt = [v for v in score_modes(_series, "blend", BASE, _W, "clamp2", _CK) if v is not None]
     if _alt == _blend:
         fails.append("加權模式用 clamp2 重算得到完全一樣的結果——scoreCurve 設定多半沒生效")
     # tanh 不封頂：任何一天的單欄分數都不該正好是 ±0.5（那是 clamp 的特徵）
@@ -1227,13 +1488,14 @@ if not after_broken or int(after_broken["win"]) != _def_win:
 print("記憶：區間與標的重新整理後還在；存到無效值或壞 JSON 時安靜退回預設")
 
 print("\n統計卡：", stats)
-print("門檻說明：", thr_note.strip()[:160])
+print("基準說明：", base_ui_state["reset"]["note"].strip()[:140])
+print("基準比較：", base_diff_note.strip()[:140])
 print()
 if fails:
     print("❌ 失敗 %d 項：" % len(fails))
     for f in fails[:40]:
         print("   -", f)
     sys.exit(1)
-print("✅ 全部通過：%d 天 × 2 門檻 × 3 種計分模式（口徑 %s），表格 / tooltip / 圖表序列 / 背景色塊 / "
-      "markLine / 副圖雙軸對齊 / 顏色與對比 / 偏好記憶 皆與 Python 獨立計算一致"
+print("✅ 全部通過：%d 天 × 2 組基準 × 3 種計分模式（口徑 %s），表格 / tooltip / 圖表序列 / 背景色塊 / "
+      "markLine / 副圖單軸（偏離基準） / 顏色與對比 / 偏好記憶 皆與 Python 獨立計算一致"
       % (len(chips), "近月" if PAGE_SCOPE == "front" else "所有契約"))

@@ -482,6 +482,15 @@ _cand = _dt.date(2026, 2, 3)
 while (_cand.strftime("%Y/%m/%d") in _m_before or _cand.weekday() >= 5):
     _cand += _dt.timedelta(days=1)
 _m_date = _cand.strftime("%Y/%m/%d")
+
+# 10) 把 chips.csv 換成一份只有兩天的舊格式 fixture 了，所以 config 裡的
+#     baselineDate（2026/09/09）已經不在歷史裡。基準點指向不存在的日期時
+#     build_site 是刻意直接失敗的（見 14)），所以這裡要把它指到等一下會寫進去的那天。
+with open(cfg_path, encoding="utf-8") as _f:
+    _raw12 = json.load(_f)
+_raw12["baselineDate"] = _m_date
+with open(cfg_path, "w", encoding="utf-8") as _f:
+    json.dump(_raw12, _f, ensure_ascii=False)
 _cfg12 = build_site.load_config()
 store.upsert_chips([{"date": _m_date, "foreign_fut": -81000,
                      "top10_trader": 500, "top10_specific": -300,
@@ -588,7 +597,46 @@ for _r in _site["margin"]:
         break
 check([r["date"] for r in _site["margin"]] == sorted(_sm),
       "margin 要照日期排序")
-print("  site.json：維持率是 {date, ratio} 陣列（天數可以和籌碼不同，前端照日期對齊）")
+
+# 基準點也要送出去，而且是從 baselineDate 那一列解析出來的七個欄位
+check(_site.get("baselineDate") == _m_date,
+      "site.json 的 baselineDate 應該是 %s，實得 %r" % (_m_date, _site.get("baselineDate")))
+_bl = _site.get("baselines") or {}
+check(set(_bl) == set(store.CHIP_COLS[1:]),
+      "baselines 要有全部七個欄位（兩種十大口徑各一份），實得 %s" % sorted(_bl))
+_brow = next(r for r in store.read_chips() if r["date"] == _m_date)
+check(all(_bl.get(k) == _brow[k] for k in store.CHIP_COLS[1:]),
+      "baselines 的值要等於 chips.csv 裡 %s 那一列，實得 %s" % (_m_date, _bl))
+print("  site.json：維持率是 {date, ratio} 陣列（天數可以和籌碼不同，前端照日期對齊）；"
+      "五票基準點是 baselineDate 那一列的七個欄位")
+
+# 14) 基準點指向不存在的日期時，build_site 要直接失敗，不可以退回別的日期。
+#     基準點會改變每一天的投票結果，悄悄用錯一天的話畫面上完全看不出來——
+#     那是這個功能最糟的失敗方式，所以這裡要吵。
+for _bad, _why in ((" ", "空白"), ("2026/01/01", "不是交易日"),
+                   ("2099/12/31", "未來的日期")):
+    with open(cfg_path, encoding="utf-8") as _f:
+        _raw14 = json.load(_f)
+    _raw14["baselineDate"] = _bad.strip()
+    with open(cfg_path, "w", encoding="utf-8") as _f:
+        json.dump(_raw14, _f, ensure_ascii=False)
+    try:
+        with _ctx.redirect_stdout(_io2.StringIO()), _ctx.redirect_stderr(_io2.StringIO()):
+            build_site.build(quiet=True)
+        check(False, "baselineDate=%r（%s）時 build_site 應該失敗，卻正常跑完" % (_bad, _why))
+    except SystemExit as e:
+        check("baselineDate" in str(e) or "基準" in str(e),
+              "baselineDate=%r 的錯誤訊息應該講清楚是基準點的問題，實得 %r" % (_bad, str(e)))
+    except Exception as e:                                        # noqa: BLE001
+        check(False, "baselineDate=%r 應該是 SystemExit，實得 %s：%s"
+                     % (_bad, type(e).__name__, e))
+# 還原成有效的那天，後面若有人再 build 才不會壞
+with open(cfg_path, encoding="utf-8") as _f:
+    _raw14 = json.load(_f)
+_raw14["baselineDate"] = _m_date
+with open(cfg_path, "w", encoding="utf-8") as _f:
+    json.dump(_raw14, _f, ensure_ascii=False)
+print("  基準點：baselineDate 指向不存在的日期時 build_site 直接失敗（不退回其他日期）")
 
 shutil.rmtree(work, ignore_errors=True)
 

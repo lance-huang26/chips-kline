@@ -43,16 +43,20 @@
     <div class="thr-note" id="modeNote"></div>
   </div>
 
-  <div class="ctl-block" id="thrBlock">
-    <div class="ctl-label">外資台指期未平倉門檻（第 1 票）</div>
-    <div class="thr-row">
-      <input type="range" id="thrRange" min="-95000" max="-75000" step="500" value="-83000">
-      <input type="number" id="thrNum" step="500" value="-83000">
-      <span class="unit">口</span>
-      <button class="preset" data-v="-83000">-83000</button>
-      <button class="preset" data-v="-80000">-80000</button>
+  <div class="ctl-block" id="baseBlock">
+    <div class="ctl-label">五票的基準點（投 +1 / −1 的分界）</div>
+
+    <!-- 介面二：選一天，把五票的基準一次填成那天的剩餘口數。常用的是這個。 -->
+    <div class="base-date-row">
+      <label for="baseDateSel">用某一天的數值當基準</label>
+      <select id="baseDateSel"></select>
+      <button type="button" class="preset" id="baseReset">重設為預設</button>
     </div>
-    <div class="thr-note" id="thrNote"></div>
+    <div class="thr-note" id="baseNote"></div>
+
+    <!-- 介面一：五票各自一個滑桿 + 數字框 -->
+    <div class="base-rows" id="baseRows"></div>
+    <div class="thr-note" id="baseDiffNote"></div>
   </div>
 
   <div class="ctl-block">
@@ -87,9 +91,15 @@
     </table>
   </div>
   <p class="foot-note">
-    註：<b>外資台指期未平倉</b>為純大台（TX）口徑；<b>前十大交易人／特定人</b>為期交所
+    註：<b>五票的基準點</b>預設取自 <b>2026/09/09</b> 那天的剩餘口數，每一票各有自己的基準；
+    投票看的是「今天離自己的基準多遠」——在基準之上投 +1、之下投 −1、剛好相等投 0。
+    所以把基準設成 9/9，9/9 那天的五票必然全部是 0。
+    副圖畫的是<b>偏離基準的口數</b>，不是絕對口數，所以 0 線同時是五票的分界；
+    絕對口數在 hover 卡片和下面的逐日明細表格裡都查得到。
+    <b>外資台指期未平倉</b>為純大台（TX）口徑；<b>前十大交易人／特定人</b>為期交所
     <code>TX + MTX/4 + TMF/20</code> 的所有契約合併口徑（期交所在 TX 底下公布的即為此合併值）。
-    兩者口徑不同，本頁只各自獨立呈現與投票，<b>不做相加減</b>。
+    兩者口徑不同，本頁只各自獨立呈現與投票，<b>不做相加減</b>；
+    基準點也因此分兩種口徑各記一份（9/9 的所有契約是 4,426 / 3,009，近月是 7,441 / 6,024）。
     <b>選擇權淨口數</b>為買權未平倉淨額減賣權未平倉淨額。
     停牌或無交易的日子 K 棒留空，不以前一日補值。
   </p>

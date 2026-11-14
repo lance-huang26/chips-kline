@@ -232,3 +232,50 @@ td.delta.neg{color:var(--down)}
   border-radius:0; align-self:center;
 }
 .chk-group label.chk-margin .swatch.dashed{color:#8a6d1f}
+
+/* 五票基準點的兩個設定介面 ------------------------------------------------ */
+/* 介面二：日期選單。擺在滑桿上面，因為它才是常用的那一個。 */
+.base-date-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.base-date-row label{font-size:12.5px;color:#52514e}
+.base-date-row select{
+  font:inherit;font-size:12.5px;padding:3px 6px;
+  border:1px solid #d8d8d3;border-radius:4px;background:#fff;color:#0b0b0b;
+}
+/* 介面一：五票各自一列（色塊＋名稱＋滑桿＋數字＋快捷＋現值）。
+   用 grid 而不是 flex：只有第 1 票有快捷按鈕，flex 會讓那一列的後面全部位移，
+   五列的數字框和「最新／偏離」就對不齊了。空的快捷格照樣佔位。 */
+.base-rows{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.base-row{
+  display:grid;align-items:center;column-gap:8px;
+  grid-template-columns:168px minmax(110px,1fr) 92px 12px 170px minmax(0,1fr);
+}
+.base-name{display:flex;align-items:center;gap:6px;min-width:0}
+.base-name .swatch{width:11px;height:11px;border-radius:2px;display:inline-block;flex:none}
+.base-label{font-size:12.5px;color:#52514e;white-space:nowrap}
+.base-row input[type=range]{width:100%;min-width:0;margin:0}
+.base-presets{display:flex;gap:5px;justify-content:flex-start}
+.base-presets .preset{white-space:nowrap}
+.base-row .unit{text-align:left}
+.base-num{
+  width:88px;font:inherit;font-size:12.5px;padding:2px 5px;text-align:right;
+  border:1px solid #d8d8d3;border-radius:4px;background:#fff;color:#0b0b0b;
+}
+.base-now{font-size:11.5px;color:#807e78;white-space:nowrap;font-variant-numeric:tabular-nums}
+.base-now b{font-weight:600}
+/* 表頭上的「基準 X」：小一號、換行擺在票名下面 */
+.th-base{display:block;font-weight:400;font-size:10px;color:#a09e97;margin-top:1px}
+
+/* 窄畫面：一列拆成兩行——名稱＋數字一行，滑桿與現值各一行 */
+@media (max-width:760px){
+  .base-row{
+    grid-template-columns:1fr auto 12px;
+    grid-template-areas:'name num unit' 'rng rng rng' 'pre now now';
+    row-gap:3px;padding-bottom:4px;border-bottom:1px dashed #ececE8;
+  }
+  .base-name{grid-area:name}
+  .base-row input[type=range]{grid-area:rng}
+  .base-num{grid-area:num}
+  .base-row .unit{grid-area:unit}
+  .base-presets{grid-area:pre}
+  .base-now{grid-area:now;text-align:right}
+}

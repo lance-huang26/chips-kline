@@ -8,19 +8,20 @@
   // 以下都是預設值，載入 data/site.json 之後會被裡面的設定覆蓋。
   // 真正的設定在 config.json，由 build_site.py 寫進 site.json。
   var SETTLEMENT = [];     // 台指期結算日（build_site.py 依每月第三個星期三推算）
-  var DEFAULT_THRESHOLD = -83000;
-  var THRESHOLD_PRESETS = [-83000, -80000];
+  var BASE_DATE = null;    // 預設基準點取自哪一天（config.json 的 baselineDate）
+  var BASE_DEFAULT = {};   // 那一天的七個欄位值（含兩種十大口徑）
+  var BASE_PRESETS = {};   // 某幾票的快捷按鈕，例如 {foreign_fut: [-83000, -80000]}
   var MA_PERIOD = 20;      // 乖離率的均線天數（月線）
   var BIAS_ALERT = 15;     // 正乖離超過這個百分比就標紅
   var WINDOW_OPTIONS = [20, 60, 120, 0];   // 0 = 全部
   var DEFAULT_WINDOW = 60;
 
   var CHIP_FIELDS = [
-    { key: 'foreign_fut',    label: '外資台指期未平倉',   short: '外資期貨', color: '#2a78d6', axis: 'big'   },
-    { key: 'top10_trader',   base: '前十大交易人', label: '前十大交易人', short: '前十大交易人', color: '#eb6834', axis: 'small' },
-    { key: 'top10_specific', base: '前十大特定人', label: '前十大特定人', short: '前十大特定人', color: '#1baf7a', axis: 'small' },
-    { key: 'foreign_opt',    label: '選擇權外資淨口數',   short: '選擇權外資', color: '#4a3aa7', axis: 'small' },
-    { key: 'dealer_opt',     label: '選擇權自營商淨口數', short: '選擇權自營', color: '#e87ba4', axis: 'small' }
+    { key: 'foreign_fut',    label: '外資台指期未平倉',   short: '外資期貨', color: '#2a78d6' },
+    { key: 'top10_trader',   base: '前十大交易人', label: '前十大交易人', short: '前十大交易人', color: '#eb6834' },
+    { key: 'top10_specific', base: '前十大特定人', label: '前十大特定人', short: '前十大特定人', color: '#1baf7a' },
+    { key: 'foreign_opt',    label: '選擇權外資淨口數',   short: '選擇權外資', color: '#4a3aa7' },
+    { key: 'dealer_opt',     label: '選擇權自營商淨口數', short: '選擇權自營', color: '#e87ba4' }
   ];
 
   // 大盤融資維持率。不是五票的一員，也不投票——它是一條「市場整體擔保品
@@ -28,6 +29,11 @@
   // 一眼就看得出它和那五條是不同性質的東西。
   var MARGIN_COLOR = '#8a6d1f';
   var MARGIN_LABEL = '大盤融資維持率';
+
+  // chips.csv 的七個欄位（十大兩種口徑各兩欄）。基準點就是照這七個鍵存的。
+  var CHIP_COLS = ['foreign_fut', 'top10_trader', 'top10_specific',
+                   'top10_trader_front', 'top10_specific_front',
+                   'foreign_opt', 'dealer_opt'];
 
   var UP = '#d93b30', DOWN = '#12996b';
   var UP_SOFT = 'rgba(217,59,48,0.09)', DOWN_SOFT = 'rgba(18,153,107,0.09)';
@@ -45,7 +51,9 @@
     dates: [],
     primary: null,
     compare: false,
-    threshold: DEFAULT_THRESHOLD,
+    base: {},              // 五票各自的基準點。鍵是 chips.csv 的欄位名（七個，
+                           // 十大兩種口徑各存一份），取值一律走 baseOf()
+    baseFrom: null,        // 目前這組基準來自哪一天；手動調過就變 null（＝自訂）
     scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
     mode: 'level',         // 計分模式：'level' 剩餘口數 / 'flow' 今日操作 / 'blend' 加權
     tab: 'chips',          // 目前分頁：'chips' 籌碼 K 線 / 'macro' 總經
@@ -264,6 +272,77 @@
     return S.dates.map(function (d) { return marginAt(d); });
   }
 
+  /* ------------------------------------------------------------ 基準點
+   *
+   * 每一票都有自己的基準點，投票看的是「今天的剩餘口數離自己的基準多遠」：
+   * 在基準之上投 +1、之下投 -1、剛好等於基準投 0。
+   *
+   * 預設那組取自 config.json 的 baselineDate（目前是 2026/09/09）。
+   * 所以選 9/9 當基準時，9/9 那天五票必然全部是 0、總分 0——
+   * 那是這個設計的定義，也是測試裡釘住的不變量。
+   *
+   * 第 2、3 票有兩種口徑，基準點必須分開記：9/9 的所有契約是 4,426 / 3,009，
+   * 近月是 7,441 / 6,024，差了三千口。共用一個數字的話切到近月時基準就錯了，
+   * 而且畫面上看起來完全正常——這種錯最難發現。
+   * 所以 S.base 的鍵用 chips.csv 的欄位名（七個），baseOf() 再依 S.scope 挑。
+   */
+  function baseKey(key) {
+    if (S.scope === 'front' && (key === 'top10_trader' || key === 'top10_specific')) {
+      return key + '_front';
+    }
+    return key;
+  }
+  function baseOf(key) {
+    var v = S.base[baseKey(key)];
+    return (v === undefined || v === null) ? 0 : v;
+  }
+  function setBase(key, v) {
+    S.base[baseKey(key)] = Math.round(Number(v));
+    // 調完之後重新問一次「這組基準對應到哪一天」，而不是直接標成自訂。
+    // 這樣兩個介面才是真的雙向：把滑桿拉回某一天的值，日期選單會自己跳回去，
+    // 不會停在「自訂」卻其實正好等於某一天。
+    S.baseFrom = matchingBaseDate();
+  }
+  // 目前這組基準正好等於哪一天的剩餘口數？沒有就回 null（＝自訂）。
+  function matchingBaseDate() {
+    var chips = S.site.chips;
+    for (var i = chips.length - 1; i >= 0; i--) {     // 新的先找，命中機率高
+      var c = chips[i], hit = true;
+      for (var j = 0; j < CHIP_COLS.length; j++) {
+        if (c[CHIP_COLS[j]] !== S.base[CHIP_COLS[j]]) { hit = false; break; }
+      }
+      if (hit) return c.date;
+    }
+    return null;
+  }
+  // 某一天的七個欄位值。給「用某一天的數值當基準」那個介面用。
+  function baselinesAt(date) {
+    for (var i = 0; i < S.site.chips.length; i++) {
+      if (S.site.chips[i].date !== date) continue;
+      var c = S.site.chips[i], out = {}, ok = true;
+      CHIP_COLS.forEach(function (k) {
+        var v = c[k];
+        if (v === null || v === undefined) { ok = false; return; }
+        out[k] = v;
+      });
+      return ok ? out : null;      // 近月欄位還沒補的舊日期 → 不給，不要用 0 代替
+    }
+    return null;
+  }
+  function useBaselinesFrom(date) {
+    var b = baselinesAt(date);
+    if (!b) return false;
+    S.base = b;
+    S.baseFrom = date;
+    return true;
+  }
+  // 偏離基準的量。副圖畫的是這個，投票也是看這個的正負。
+  function devOf(chip, key) {
+    var x = chip[key];
+    if (x === null || x === undefined) return null;
+    return x - baseOf(key);
+  }
+
   // 近月欄位是後來才加的。舊資料沒有的話不能默默當 0——0 看起來很合理，
   // 混進去幾乎不可能被發現——所以直接把那個選項鎖起來，並說要跑什麼補。
   function frontReady() {
@@ -291,21 +370,28 @@
    *   blend  權重：每欄拆成水位 0.5 + 操作 0.5
    */
   var MODES = [
-    { key: 'level', label: '剩餘口數', note: '五張票各看剩餘口數的正負，±1。' },
+    { key: 'level', label: '剩餘口數', note: '五張票各看剩餘口數離自己基準點的正負，±1（剛好等於基準是 0）。' },
     { key: 'flow',  label: '今日操作', note: '五張票各看今日操作（今日 − 昨日）的正負，±1。' },
     { key: 'blend', label: '加權',     note: '每欄拆成水位 0.5 ＋ 操作 0.5，分數連續。' }
   ];
 
   /* 模式 3 的算法（用 2026/05~09 的實際資料調出來的，理由見 README）：
    *
-   *   u    = (今天的值 − 中性點) ÷ 窗內穩健標準差      ← 「是平常波動的幾倍」
+   *   u    = (今天的值 − 基準點) ÷ 窗內穩健標準差      ← 「離基準幾倍平常波動」
    *   水位分 = curve(u) × 0.5
    *   操作分 = curve(今日變動 ÷ 變動的穩健標準差) × 0.5
    *
-   * 中性點分欄設定，這是關鍵：外資期貨在 87 天裡「一天都沒有正過」
-   * （平均 -75,407），選擇權外資也只有 5%。對這兩欄用 0 當中性點的話，
-   * 水位分會永遠卡在 -0.41 ~ -0.50，標準差只有 0.026——那是常數不是分數，
-   * 那一票等於完全失效。所以它們改用窗內中位數當中性點。
+   * 中性點＝五票各自的基準點，和剩餘口數模式用的是同一組數字。
+   * 原本是「分欄設定」：外資期貨與選擇權外資在歷史上幾乎沒有正值過
+   * （前者 87 天裡一天都沒有），用 0 當中性點水位分會永遠卡在 -0.41~-0.50、
+   * 標準差只有 0.026，那是常數不是分數；所以那兩欄改用窗內中位數。
+   * 現在有了明確的基準點，就不需要那套例外了——基準點本身就是中性點。
+   *
+   * 換成固定基準會不會讓分數長期飽和？量過：以 9/9 當基準、tanh/2.5、20 日窗，
+   * 97 天裡「超過 99% 滿分」的比例是 0~1%，和原本的分欄設定（0~2.1%）一樣，
+   * |u| 的中位數也差不多（0.85~1.50 對 0.88~1.61）。
+   * 但這個結論只在資料還沒遠離基準時成立——真的漂走幾個月的話，
+   * 用「基準來源日」那個選單把基準往前搬就是解法。
    *
    * 尺度用 MAD×1.4826 而不是標準差：籌碼資料有厚尾，而且結算換月會跳空，
    * 一天的極端值就會把標準差拉大、讓之後 N 天的分數全部縮水。
@@ -313,9 +399,6 @@
   var SCORE_WINDOW = 20;
   var SCORE_CURVE = 'tanh';    // 'tanh' | 'clamp2' | 'clamp3'
   var CURVE_K = 2.5;           // tanh 的緩和係數
-  // 中性點用 0 的欄位＝實際上會繞著 0 擺動的（>0 的天數約 48%~63%）。
-  // 沒列在這裡的用窗內中位數。
-  var ZERO_CENTERED = { top10_trader: 1, top10_specific: 1, dealer_opt: 1 };
 
   function curve(u) {
     if (!isFinite(u)) return 0;
@@ -338,7 +421,7 @@
   }
 
   // 對整個歷史算分（模式 2、3 需要更早的資料當暖身，不能只看視窗內）
-  function scoreHistory(threshold) {
+  function scoreHistory() {
     var n = S.allChips.length, out = new Array(n), i, j, f;
     var W = SCORE_WINDOW;
 
@@ -349,9 +432,12 @@
         f = CHIP_FIELDS[j];
         var x = c[f.key];
         if (x === null || x === undefined) { ok = false; break; }
+        var b = baseOf(f.key);
 
         if (S.mode === 'level') {
-          v.push(x > (f.key === 'foreign_fut' ? threshold : 0) ? 1 : -1);
+          // 在基準之上 +1、之下 -1、剛好等於基準 0。
+          // 0 不是「算不出來」（那是 null，顯示成 —），是「完全沒有偏離基準」。
+          v.push(x > b ? 1 : (x < b ? -1 : 0));
           continue;
         }
         if (i === 0) { ok = false; break; }          // 沒有前一日就沒有「今日操作」
@@ -366,10 +452,10 @@
           lw.push(S.allChips[g][f.key]);
           dw.push(S.allChips[g][f.key] - S.allChips[g - 1][f.key]);
         }
-        var center = ZERO_CENTERED[f.key] ? 0 : median(lw);
+        // 中性點＝這一票的基準點，和剩餘口數模式完全同一個數字
         var sLv = madSigma(lw), sFl = madSigma(dw, 0);
         if (!(sLv > 0) || !(sFl > 0)) { ok = false; break; }
-        v.push(curve((x - center) / sLv) + curve(d / sFl));
+        v.push(curve((x - b) / sLv) + curve(d / sFl));
       }
 
       out[i] = ok ? {
@@ -381,8 +467,14 @@
     }
     return out;
   }
-  function scoreAll(threshold) {
-    return scoreHistory(threshold).slice(S.startIdx);
+  function scoreAll() {
+    return scoreHistory().slice(S.startIdx);
+  }
+  // 用另一組基準算一遍（統計卡要比「你調過的基準」和「預設基準」差幾天）
+  function scoreWithBase(base) {
+    var keep = S.base, keepFrom = S.baseFrom;
+    S.base = base;
+    try { return scoreAll(); } finally { S.base = keep; S.baseFrom = keepFrom; }
   }
 
   // 取一個「好看的」刻度間距：1/1.5/2/2.5/3/4/5/6/8 ×10^k 之中，>= x 的最小值
@@ -397,51 +489,50 @@
     return 10 * e;
   }
 
-  /* 副圖雙軸對齊。
-   * foreign_fut 的量級（約 -9 萬）和其他四項（數千）差太多，必須用獨立右軸；
-   * 但兩軸各自 auto-scale 的話，「外資是否站上門檻」和「其他項是否為正」
-   * 在畫面上會落在不同高度，看起來對不起來。
+  /* 副圖只有一根軸，畫的是「偏離自己的基準點多少口」。
    *
-   * 這裡把兩軸都切成固定 N 段，並讓右軸的「門檻」和左軸的「0」
-   * 落在同一條格線（由下往上數第 k 條）上，所以：
-   *   - 兩軸格線完全重疊
-   *   - 那條線以上 = 該票投 +1，以下 = -1，五條線讀法一致
-   * k 由左軸資料的正負比例決定（挑總範圍最小的那個），右軸再跟著它算。
+   * 原本這裡是一套雙軸對齊的機器：foreign_fut 在 -81,000 附近、其他四項在
+   * 數千，量級差 20 倍，所以 foreign_fut 得用獨立右軸，再硬把右軸的門檻
+   * 和左軸的 0 排到同一條格線上，讀圖的人才知道「這條線以上就是投 +1」。
+   *
+   * 五票各自有基準點之後那套就不需要了，而且是量過的：扣掉自己的基準之後，
+   * 五票的波動幅度彼此只差 3.3~3.6 倍（20 / 60 / 118 天三個視窗、兩種口徑都量過），
+   * 不是原本的 20 倍。差 20 倍的其實只是「位置」不是「波動」，
+   * 減掉基準就把位置拿掉了。
+   *
+   * 所以：一根軸、一條 0 線，0 線以上投 +1、以下投 -1，五條線讀法完全一致。
+   * 代價是看不到絕對口數——那在 hover 卡片和下方的逐日明細表格裡都查得到。
    */
   var AXIS_SPLITS = 4;
-  function subAxisRanges() {
-    var N = AXIS_SPLITS;
-
-    // 左軸：目前有勾選的「數千」等級欄位
-    var lVals = [];
+  function subAxisRange() {
+    var N = AXIS_SPLITS, vals = [];
     CHIP_FIELDS.forEach(function (f) {
-      if (f.axis === 'small' && S.shown[f.key]) {
-        S.chips.forEach(function (c) { lVals.push(c[f.key]); });
-      }
+      if (!S.shown[f.key]) return;
+      S.chips.forEach(function (c) {
+        var d = devOf(c, f.key);
+        if (d !== null) vals.push(d);
+      });
     });
-    var lMin = lVals.length ? Math.min.apply(null, lVals) : -1;
-    var lMax = lVals.length ? Math.max.apply(null, lVals) : 1;
-    var lPad = 0.08 * Math.max(lMax - lMin, 1);
-    var lo = Math.min(lMin - lPad, 0), hi = Math.max(lMax + lPad, 0);
+    var mn = vals.length ? Math.min.apply(null, vals) : -1;
+    var mx = vals.length ? Math.max.apply(null, vals) : 1;
+    var pad = 0.08 * Math.max(mx - mn, 1);
+    var lo = Math.min(mn - pad, 0), hi = Math.max(mx + pad, 0);
 
+    // 把 0 擺在某一條格線上（由下往上數第 k 條），格線才會落在整數刻度上，
+    // 而且 0 線不會是一條夾在格子中間的孤線。
     var best = null;
-    for (var k = 1; k <= N - 1; k++) {
-      var iv = niceStep(Math.max(-lo / k, hi / (N - k)));
-      if (!best || iv * N < best.iv * N) best = { k: k, iv: iv };
+    for (var k = 0; k <= N; k++) {
+      if (k === 0 && lo < 0) continue;
+      if (k === N && hi > 0) continue;
+      var need = Math.max(k > 0 ? -lo / k : 0, k < N ? hi / (N - k) : 0);
+      var iv = niceStep(need);
+      if (!best || iv < best.iv) best = { k: k, iv: iv };
     }
-
-    // 右軸：門檻擺在同一條格線上，往上往下各留足夠容納資料的空間
-    var rVals = S.chips.map(function (c) { return c.foreign_fut; });
-    var rMin = Math.min.apply(null, rVals), rMax = Math.max.apply(null, rVals);
-    var rPad = 0.08 * Math.max(rMax - rMin, 1);
-    var below = Math.max(S.threshold - rMin, 0) + rPad;
-    var above = Math.max(rMax - S.threshold, 0) + rPad;
-    var ivR = niceStep(Math.max(below / best.k, above / (N - best.k)));
-
     return {
       k: best.k, n: N,
-      left:  { min: -best.k * best.iv, max: (N - best.k) * best.iv, interval: best.iv },
-      right: { min: S.threshold - best.k * ivR, max: S.threshold + (N - best.k) * ivR, interval: ivR }
+      min: -best.k * best.iv,
+      max: (N - best.k) * best.iv,
+      interval: best.iv
     };
   }
 
@@ -700,24 +791,8 @@
     if (!mReady) mlab.title = '歷史檔還沒有維持率資料，跑 python3 update_daily.py --only-margin --days 130 補齊';
     g.appendChild(mlab);
 
-    var rng = el('thrRange'), num = el('thrNum');
-    function setThr(v, from) {
-      v = Math.round(Number(v));
-      if (isNaN(v)) return;
-      S.threshold = v;
-      if (from !== 'range') rng.value = v;
-      if (from !== 'num') num.value = v;
-      Array.prototype.forEach.call(document.querySelectorAll('button.preset'), function (b) {
-        b.classList.toggle('on', Number(b.dataset.v) === v);
-      });
-      render();
-    }
-    rng.oninput = function () { setThr(rng.value, 'range'); };
-    num.oninput = function () { setThr(num.value, 'num'); };
-    Array.prototype.forEach.call(document.querySelectorAll('button.preset'), function (b) {
-      b.onclick = function () { setThr(b.dataset.v, 'preset'); };
-    });
-    setThr(DEFAULT_THRESHOLD, 'init');
+    buildBaseControls();
+    render();                // 原本是靠 setThr() 順便觸發的，門檻控制項拿掉之後要自己來
 
     el('compareChk').onchange = function () { S.compare = this.checked; render(); };
 
@@ -726,7 +801,176 @@
     });
   }
 
-  // ---------------------------------------------------------------- 統計條 / 門檻比較
+  /* 基準點的兩個設定介面。
+   *
+   * 介面一（#baseRows）：五票各自一個滑桿 + 數字框。滑桿的範圍不是寫死的，
+   *   是從那一欄的全部歷史抓 min/max 再往外放寬，不然新資料一跑出範圍就拉不到。
+   *   某幾票可以在 config.json 的 baselinePresets 給快捷按鈕
+   *   （目前只有第 1 票的 -83000 / -80000，那是原本的門檻預設值）。
+   *
+   * 介面二（#baseDateSel）：一個日期選單，選哪天就把五票的基準一次填成那天的
+   *   剩餘口數。預設停在 config.json 的 baselineDate（2026/09/09）。
+   *   這個介面才是常用的那一個——「以某一天的狀態當基準」本來就是這個功能的原意，
+   *   而且資料哪天真的漂走了，把基準往前搬一天就解決，不必手動調五個數字。
+   *
+   * 兩個介面共用同一份 S.base，所以會互相反映：拉過滑桿之後選單會變成「自訂」，
+   * 重新選一個日期則會把五個滑桿一起拉回那天的值。
+   *
+   * 基準點刻意不寫進 localStorage。和門檻、十大口徑一樣的理由：它會改變判讀結果，
+   * 應該以 config.json 為準。不小心點過一次就永久記住的話，
+   * 之後每次打開看到的都是自己都忘了設過的東西。
+   */
+  function baseRange(key) {
+    var col = baseKey(key), vals = [];
+    S.site.chips.forEach(function (c) {
+      var v = c[col];
+      if (v !== null && v !== undefined) vals.push(v);
+    });
+    if (!vals.length) return { min: -1000, max: 1000, step: 100 };
+    var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+    var pad = 0.25 * Math.max(mx - mn, 1);          // 往外放寬，給新資料留空間
+    var step = Math.max(1, niceStep((mx - mn) / 200));
+    return {
+      min: Math.floor((mn - pad) / step) * step,
+      max: Math.ceil((mx + pad) / step) * step,
+      step: step
+    };
+  }
+
+  function buildBaseControls() {
+    var box = el('baseRows');
+    box.innerHTML = '';
+    CHIP_FIELDS.forEach(function (f) {
+      var r = baseRange(f.key);
+      var row = document.createElement('div');
+      row.className = 'base-row';
+      row.dataset.key = f.key;
+
+      var name = document.createElement('div');
+      name.className = 'base-name';
+      name.innerHTML = '<span class="swatch" style="background:' + f.color + '"></span>' +
+                       '<span class="base-label">' + f.label + '</span>';
+      row.appendChild(name);
+
+      var rng = document.createElement('input');
+      rng.type = 'range'; rng.className = 'base-range';
+      // step 固定 1：滑桿只是拖曳用，真正的粗略刻度給數字框的上下鍵。
+      // 如果這裡跟著 r.step（例如 250），把 -81,066 寫回滑桿會被吸附成 -81,000，
+      // 兩個輸入框就對不起來了。
+      rng.min = r.min; rng.max = r.max; rng.step = 1;
+      rng.setAttribute('aria-label', f.label + ' 的基準點（滑桿）');
+
+      var num = document.createElement('input');
+      num.type = 'number'; num.className = 'base-num';
+      num.step = r.step;
+      num.setAttribute('aria-label', f.label + ' 的基準點（數字）');
+
+      row.appendChild(rng);
+      row.appendChild(num);
+
+      var unit = document.createElement('span');
+      unit.className = 'unit'; unit.textContent = '口';
+      row.appendChild(unit);
+
+      // 快捷按鈕包成一格（即使是空的），五列的欄位才對得齊——
+      // 只有第 1 票有按鈕，不包起來的話那一列的「最新／偏離」會被擠到下一行。
+      var pbox = document.createElement('div');
+      pbox.className = 'base-presets';
+      (BASE_PRESETS[f.key] || []).forEach(function (v) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'preset base-preset';
+        b.dataset.key = f.key; b.dataset.v = v;
+        b.textContent = fmt(v);
+        b.onclick = function () { setBase(f.key, v); syncBaseControls(); render(); };
+        pbox.appendChild(b);
+      });
+      row.appendChild(pbox);
+
+      var now = document.createElement('span');
+      now.className = 'base-now';
+      row.appendChild(now);
+
+      rng.oninput = function () { setBase(f.key, rng.value); syncBaseControls(); render(); };
+      num.oninput = function () {
+        if (num.value === '' || isNaN(Number(num.value))) return;
+        setBase(f.key, num.value); syncBaseControls(); render();
+      };
+      box.appendChild(row);
+    });
+
+    var sel = el('baseDateSel');
+    sel.innerHTML = '';
+    var custom = document.createElement('option');
+    custom.value = ''; custom.textContent = '自訂（手動調過）';
+    sel.appendChild(custom);
+    // 新的在上面，和逐日明細表格一致
+    S.site.chips.slice().reverse().forEach(function (c) {
+      var o = document.createElement('option');
+      o.value = c.date;
+      o.textContent = c.date + (c.date === BASE_DATE ? '（預設）' : '');
+      // 近月欄位還沒補的舊日期不能選——拿不到那兩個基準，而用 0 代替
+      // 會讓第 2、3 票整段投錯，畫面上還完全正常
+      if (!baselinesAt(c.date)) { o.disabled = true; o.textContent += '（近月欄位未補齊）'; }
+      sel.appendChild(o);
+    });
+    sel.onchange = function () {
+      if (!sel.value) { syncBaseControls(); return; }     // 「自訂」不是一個動作
+      if (!useBaselinesFrom(sel.value)) { syncBaseControls(); return; }
+      syncBaseControls(); render();
+    };
+
+    el('baseReset').onclick = function () {
+      S.base = {};
+      CHIP_COLS.forEach(function (k) { S.base[k] = BASE_DEFAULT[k]; });
+      S.baseFrom = BASE_DATE;
+      syncBaseControls(); render();
+    };
+
+    syncBaseControls();
+  }
+
+  // 把 S.base 的現況寫回兩個介面（滑桿、數字框、快捷按鈕、日期選單、說明）
+  function syncBaseControls() {
+    var box = el('baseRows');
+    if (!box || !box.children.length) return;    // 還沒建好（第一次 render 在建控制列之前）
+    var last = S.chips.length ? S.chips[S.chips.length - 1] : null;
+    Array.prototype.forEach.call(box.children, function (row) {
+      var key = row.dataset.key;
+      var v = baseOf(key);
+      var rng = row.querySelector('.base-range'), num = row.querySelector('.base-num');
+      // 滑桿的範圍是依口徑算的，切口徑時要跟著換（近月和所有契約差三千口）
+      var r = baseRange(key);
+      rng.min = r.min; rng.max = r.max; rng.step = 1; num.step = r.step;
+      if (Number(rng.value) !== v) rng.value = v;
+      if (Number(num.value) !== v) num.value = v;
+      Array.prototype.forEach.call(row.querySelectorAll('.base-preset'), function (b) {
+        b.classList.toggle('on', Number(b.dataset.v) === v);
+      });
+      var now = row.querySelector('.base-now');
+      if (!last) { now.textContent = ''; return; }
+      var d = devOf(last, key);
+      now.innerHTML = '最新 ' + fmt(last[key]) + '　偏離 <b class="' +
+        (d === null ? '' : cls(d)) + '">' + fmtDelta(d) + '</b>';
+    });
+
+    var sel = el('baseDateSel');
+    sel.value = S.baseFrom || '';
+    var same = sameBase(S.base, BASE_DEFAULT);
+    el('baseNote').innerHTML = S.baseFrom
+      ? '基準＝<b>' + S.baseFrom + '</b> 那天的剩餘口數' +
+        (same ? '（就是預設值）' : '') + '。副圖畫的是每天離這組基準多少口，' +
+        '<b>0 線以上投 +1</b>。'
+      : '基準是<b>手動調過的</b>，不對應任何一天。要回到 ' + BASE_DATE +
+        ' 按「重設為預設」，或直接從選單挑一天。';
+  }
+  function sameBase(a, b) {
+    for (var i = 0; i < CHIP_COLS.length; i++) {
+      if (a[CHIP_COLS[i]] !== b[CHIP_COLS[i]]) return false;
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------- 統計條 / 基準點比較
   function renderStats(sc) {
     // 算不出來的日子（模式 2 的第一天、模式 3 暖身不足）一律不計入統計，
     // 不能當成 0——0 是「多空剛好抵銷」，和「算不出來」是兩件事。
@@ -734,10 +978,19 @@
     var pos = 0, neg = 0, zero = 0;
     have.forEach(function (s) { if (s.total > 0) pos++; else if (s.total < 0) neg++; else zero++; });
 
-    var p0 = THRESHOLD_PRESETS[0], p1 = THRESHOLD_PRESETS[1];
+    /* 「你調過的基準」和「預設基準」差幾天。
+     *
+     * 這一格原本是比兩個門檻（-83000 vs -80000）總分差幾天。五票都有自己的基準
+     * 之後那個問題就不對了——可調的旋鈕從一個變成五個，只比第 1 票沒有意義。
+     * 改成比「現在這組」對「預設那組」：沒調過就是 0 天，調得越多差得越多，
+     * 直接告訴你判讀對基準有多敏感。這是原本那一格的推廣，不是拿掉。
+     *
+     * 三種模式都適用：基準點現在同時是剩餘口數模式的分界和加權模式的中性點。
+     */
+    var atDefault = sameBase(S.base, BASE_DEFAULT);
     var diff = [];
-    if (S.mode === 'level') {          // 門檻只影響第 1 票，其他模式根本用不到
-      var a = scoreAll(p0), b = scoreAll(p1);
+    if (!atDefault) {
+      var a = sc, b = scoreWithBase(BASE_DEFAULT);
       for (var i = 0; i < a.length; i++) {
         if (a[i] && b[i] && a[i].total !== b[i].total) diff.push(S.dates[i]);
       }
@@ -759,27 +1012,29 @@
       card(st.code + ' ' + st.name + ' 區間報酬',
            (ret === null ? '—' : (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%'),
            ret === null ? '' : cls(ret)),
-      (S.mode === 'level'
-        ? card('門檻 ' + fmt(p0) + ' vs ' + fmt(p1), diff.length + '<small> 天不同</small>', '')
-        : card('可計分天數', have.length + '<small>/ ' + sc.length + '</small>',
-               have.length === sc.length ? '' : 'pending'))
+      (atDefault
+        ? card('可計分天數', have.length + '<small>/ ' + sc.length + '</small>',
+               have.length === sc.length ? '' : 'pending')
+        : card('vs 預設基準', diff.length + '<small> 天不同</small>',
+               diff.length ? 'pending' : ''))
     ].join('');
 
-    if (S.mode !== 'level') {
-      el('thrNote').innerHTML =
-        '目前是「' + modeLabel() + '」模式，<b>門檻只影響「剩餘口數」模式的第 1 票</b>，這裡不會用到。' +
-        (have.length < sc.length
-          ? ' 另外有 <b>' + (sc.length - have.length) + '</b> 天因為暖身不足算不出分數，顯示為 —。'
-          : '');
+    var warm = have.length < sc.length
+      ? ' 有 <b>' + (sc.length - have.length) + '</b> 天因為暖身不足算不出分數，顯示為 —。'
+      : '';
+    if (atDefault) {
+      el('baseDiffNote').innerHTML =
+        '基準是預設的那一組（' + BASE_DATE + '），所以沒有對照可比。' +
+        '調過之後這裡會告訴你和預設差幾天。' + warm;
       return;
     }
     var few = diff.length <= 12;
-    el('thrNote').innerHTML = diff.length
-      ? '目前 <b>' + fmt(p0) + '</b> 與 <b>' + fmt(p1) + '</b> 兩個門檻，總分不同的有 <b>' +
-        diff.length + '</b> 天' +
-        (few ? '：' + diff.join('、') : '（區間較長，日期請看下方表格）') +
-        '（差異全部來自第 1 票的正負翻轉）。'
-      : '<b>' + fmt(p0) + '</b> 與 <b>' + fmt(p1) + '</b> 兩個門檻在本區間內判讀完全相同。';
+    el('baseDiffNote').innerHTML = (diff.length
+      ? '和預設基準（<b>' + BASE_DATE + '</b>）相比，「' + modeLabel() +
+        '」模式的總分不同的有 <b>' + diff.length + '</b> 天' +
+        (few ? '：' + diff.join('、') : '（區間較長，日期請看下方表格）') + '。'
+      : '雖然基準調過了，但在本區間內「' + modeLabel() +
+        '」模式的總分和預設基準完全相同。') + warm;
   }
   function card(k, v, c) {
     return '<div class="stat"><div class="k">' + k + '</div><div class="v ' + (c || '') + '">' + v + '</div></div>';
@@ -871,11 +1126,13 @@
       markLine: { silent: true, symbol: 'none', data: mlData, animation: false }
     };
 
-    var sub = subAxisRanges();
+    var sub = subAxisRange();
     var showMargin = S.showMargin && marginReady();
-    var subRight = showMargin ? 124 : 62;
+    // 副圖只剩一根左軸，所以勾了維持率也只需要一排右側刻度
+    var subRight = showMargin ? 76 : 62;
 
-    // 副圖的對齊基準線：左軸 0 == 右軸門檻，兩者在同一個高度
+    // 副圖的 0 線＝每一票自己的基準點。五條線都已經減掉各自的基準，
+    // 所以這一條線同時是五票的分界：在線上投 +1、在線下投 -1。
     var subGuide = {
       name: '__sub_guide', type: 'line', xAxisIndex: 1, yAxisIndex: 2,
       data: S.dates.map(function () { return null; }),
@@ -888,7 +1145,7 @@
           label: {
             show: true, position: 'insideStartTop', fontSize: 10.5, color: '#6e6c66',
             backgroundColor: 'rgba(252,252,251,.85)', padding: [1, 4],
-            formatter: '左軸 0 ＝ 右軸門檻 ' + fmt(S.threshold)
+            formatter: '0 ＝ 各自的基準點（在線上投 +1）'
           }
         }]
       }
@@ -899,8 +1156,8 @@
         name: f.label,
         type: 'line',
         xAxisIndex: 1,
-        yAxisIndex: f.axis === 'big' ? 3 : 2,
-        data: S.chips.map(function (c) { return c[f.key]; }),
+        yAxisIndex: 2,                 // 五票共用一根軸（都是「偏離基準」的口數）
+        data: S.chips.map(function (c) { return devOf(c, f.key); }),
         symbol: 'circle', symbolSize: 5, showSymbol: false,
         lineStyle: { width: 2, color: f.color },
         itemStyle: { color: f.color },
@@ -908,14 +1165,13 @@
       };
     });
 
-    // 維持率（%）和口數不是同一個量級也不是同一個單位，所以給它自己的軸，
-    // 擺在外資期貨那根軸再往右 offset 的位置。刻意不去對齊格線——
-    // 口數那兩軸的格線有「門檻 = 0」的意義，維持率沒有對應的基準點，
-    // 硬是對齊只會讓人以為那條格線對它也代表什麼。
+    // 維持率（%）和口數不是同一個量級也不是同一個單位，所以給它自己的右軸。
+    // 刻意不去對齊格線——副圖的 0 線代表「各票的基準點」，
+    // 維持率沒有對應的基準，硬是對齊只會讓人以為那條格線對它也代表什麼。
     if (S.showMargin && marginReady()) {
       chipSeries = chipSeries.concat([{
         name: MARGIN_LABEL,
-        type: 'line', xAxisIndex: 1, yAxisIndex: 4,
+        type: 'line', xAxisIndex: 1, yAxisIndex: 3,
         data: marginSeriesData(),
         symbol: 'circle', symbolSize: 4, showSymbol: false,
         lineStyle: { width: 1.8, color: MARGIN_COLOR, type: 'dashed' },
@@ -990,25 +1246,17 @@
           axisLabel: { color: SCORE_COLOR, fontSize: 11 },
           splitLine: { show: false }
         },
-        { // 副圖左：其他四項（口）。min/max/interval 由 subAxisRanges() 算，和右軸共用格線
-          type: 'value', gridIndex: 1, name: '口（前十大／選擇權）',
-          min: sub.left.min, max: sub.left.max, interval: sub.left.interval,
+        { // 副圖：五票共用這一根，畫的是「偏離自己的基準點幾口」。
+          // min/max/interval 由 subAxisRange() 算，0 一定落在某一條格線上。
+          type: 'value', gridIndex: 1, name: '口（偏離基準）',
+          min: sub.min, max: sub.max, interval: sub.interval,
           nameTextStyle: { color: '#807e78', fontSize: 10.5, align: 'left' }, nameGap: 12,
           axisLine: { show: false }, axisTick: { show: false },
           axisLabel: { color: '#807e78', fontSize: 10.5 },
           splitLine: { lineStyle: { color: '#efefec' } }
         },
-        { // 副圖右：外資台指期。門檻對齊左軸的 0，段數與左軸相同故格線重疊
+        { // 副圖右：大盤融資維持率（%）。自己 auto-scale，不參與格線對齊
           type: 'value', gridIndex: 1, position: 'right',
-          min: sub.right.min, max: sub.right.max, interval: sub.right.interval,
-          name: '口（外資期貨，門檻對齊左軸 0）',
-          nameTextStyle: { color: '#2a78d6', fontSize: 10.5, align: 'right' }, nameGap: 12,
-          axisLine: { show: false }, axisTick: { show: false },
-          axisLabel: { color: '#2a78d6', fontSize: 10.5 },
-          splitLine: { show: false }
-        },
-        { // 副圖再往右：大盤融資維持率（%）。自己 auto-scale，不參與格線對齊
-          type: 'value', gridIndex: 1, position: 'right', offset: 62,
           scale: true, show: showMargin,
           name: showMargin ? '%（融資維持率）' : '',
           nameTextStyle: { color: MARGIN_COLOR, fontSize: 10.5, align: 'right' },
@@ -1050,14 +1298,18 @@
     h += '<div style="padding:7px 11px 3px"><table style="font-size:11.5px;border-spacing:0">';
     h += '<tr style="color:#a09e97;font-size:10.5px"><td></td>' +
          '<td style="padding:0 8px 2px 0;text-align:right">口數</td>' +
+         '<td style="padding:0 8px 2px 0;text-align:right">偏離基準</td>' +
          '<td style="padding:0 8px 2px 0;text-align:right">本日操作</td>' +
          '<td style="padding:0 0 2px;text-align:right">票</td></tr>';
     CHIP_FIELDS.forEach(function (f, i) {
       var v = s ? s.votes[i] : null, dd = dayDelta(idx, f.key);
+      var dv = devOf(c, f.key);
       h += '<tr>' +
         '<td style="padding:1px 8px 1px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
           f.color + ';margin-right:6px"></span>' + f.label + '</td>' +
         '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums">' + fmt(c[f.key]) + '</td>' +
+        '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;font-weight:600;color:' +
+          (dv === null ? '#a09e97' : dv > 0 ? UP : dv < 0 ? DOWN : '#52514e') + '">' + fmtDelta(dv) + '</td>' +
         '<td style="padding:1px 8px 1px 0;text-align:right;font-variant-numeric:tabular-nums;color:' +
           (dd === null ? '#a09e97' : dd > 0 ? UP : dd < 0 ? DOWN : '#52514e') + '">' + fmtDelta(dd) + '</td>' +
         '<td style="padding:1px 0;text-align:right;font-weight:600;color:' +
@@ -1089,8 +1341,8 @@
     }
 
     h += '<div style="padding:0 11px 8px;font-size:10.5px;color:#a09e97">計分模式：' + modeLabel() +
-         (S.mode === 'level' ? '（第 1 票門檻 ' + fmt(S.threshold) + ' 口）'
-                             : (s ? '' : '（暖身不足，這天算不出分數）')) + '</div>';
+         '　基準：' + (S.baseFrom ? S.baseFrom : '自訂') +
+         (s ? '' : '（暖身不足，這天算不出分數）') + '</div>';
     return h;
   }
   function kv(k, v) {
@@ -1110,7 +1362,10 @@
     var h1 = '<tr><th class="date" rowspan="2">日期</th>' +
              '<th rowspan="2">收盤</th><th rowspan="2">漲跌幅</th>' +
              '<th rowspan="2">MA' + MA_PERIOD + '</th><th rowspan="2">乖離率</th>';
-    CHIP_FIELDS.forEach(function (f) { h1 += '<th class="grp" colspan="3">' + f.short + '</th>'; });
+    CHIP_FIELDS.forEach(function (f) {
+      h1 += '<th class="grp" colspan="3">' + f.short +
+            '<span class="th-base">基準 ' + fmt(baseOf(f.key)) + '</span></th>';
+    });
     h1 += '<th class="sep" rowspan="2">期貨小計</th><th rowspan="2">選擇權小計</th><th rowspan="2">總分</th></tr>';
     var h2 = '<tr>';
     CHIP_FIELDS.forEach(function () {
@@ -1201,8 +1456,9 @@
   }
 
   function render() {
-    var sc = scoreAll(S.threshold);
+    var sc = scoreAll();
     renderHeader();
+    syncBaseControls();      // 切口徑或切區間之後，滑桿範圍與「最新／偏離」要跟著更新
     renderStats(sc);
     chart.setOption(buildOption(sc), true);
     renderTable(sc);
@@ -1228,10 +1484,19 @@
     if (site.maPeriod) MA_PERIOD = site.maPeriod;
     if (site.biasAlert) BIAS_ALERT = site.biasAlert;
     if (site.settlements) SETTLEMENT = site.settlements;
-    if (site.thresholdPresets) THRESHOLD_PRESETS = site.thresholdPresets;
+    if (site.baselinePresets) BASE_PRESETS = site.baselinePresets;
     if (site.windowOptions) WINDOW_OPTIONS = site.windowOptions;
     if (site.defaultWindow !== undefined) { DEFAULT_WINDOW = site.defaultWindow; S.win = DEFAULT_WINDOW; }
-    if (site.defaultThreshold !== undefined) { DEFAULT_THRESHOLD = site.defaultThreshold; }
+    // 基準點。site.json 一定會帶（build_site.py 從 config.json 的 baselineDate 解析），
+    // 缺了就直接讓它炸在 fail() 裡，不要默默用 0——用 0 的話五票會整段投錯。
+    if (!site.baselines || !site.baselineDate) {
+      throw new Error('site.json 少了 baselines / baselineDate：'
+                      + '跑一次 python3 build_site.py');
+    }
+    BASE_DATE = site.baselineDate;
+    BASE_DEFAULT = site.baselines;
+    CHIP_COLS.forEach(function (k) { S.base[k] = BASE_DEFAULT[k]; });
+    S.baseFrom = BASE_DATE;
     if (site.scoreWindow) SCORE_WINDOW = site.scoreWindow;
     if (site.scoreCurve) SCORE_CURVE = site.scoreCurve;
     if (site.scoreCurveK) CURVE_K = site.scoreCurveK;
