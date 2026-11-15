@@ -125,6 +125,34 @@ def build(quiet=False):
                 "——基準點不可以用 0 代替" % (base_date, col))
         baselines[col] = v
 
+    # 「滿分口數」：剩餘口數·類比模式把偏離映成 −1~+1 時的尺度。
+    # 預設取全部歷史 |偏離基準| 的第 N 百分位（預設 90），也就是
+    # 「平常最大的那種偏離就給 0.90 分」。前端可以再改。
+    #
+    # 為什麼不在前端算：它要掃全部歷史，而且會隨著使用者調基準而跳動——
+    # 基準和尺度同時在動的話，分數為什麼變了會很難講清楚。
+    # 這裡算一次、釘在 site.json，之後只有使用者自己改。
+    q = cfg.get("fullScaleQuantile", 90)
+    if not (0 < q < 100):
+        raise SystemExit("config.json 的 fullScaleQuantile 要在 0~100 之間，實得 %r" % q)
+    full_scales = {}
+    for col in store.CHIP_COLS[1:]:
+        devs = sorted(abs(c[col] - baselines[col]) for c in chips
+                      if c[col] is not None)
+        if not devs:
+            raise SystemExit("%s 整欄都是空的，算不出滿分口數" % col)
+        i = (len(devs) - 1) * q / 100.0
+        lo, hi = int(i), min(int(i) + 1, len(devs) - 1)
+        v = devs[lo] + (devs[hi] - devs[lo]) * (i - lo)
+        # 整欄都等於基準時 p90 會是 0，那樣分母是 0 整票就廢掉了。
+        # 真的發生代表資料有問題，直接吵出來，不要默默給一個 1。
+        if v <= 0:
+            raise SystemExit(
+                "%s 的 |偏離基準| 第 %s 百分位是 0（整段歷史幾乎都等於基準 %s）"
+                "——滿分口數不能是 0，請檢查 baselineDate 或改 fullScaleQuantile"
+                % (col, q, format(baselines[col], ",")))
+        full_scales[col] = int(round(v))
+
     # 大盤融資維持率。和籌碼是兩套獨立的來源，日期不保證一樣多
     # （剛加這個功能時只有最近 90 天，籌碼卻有一整年），所以前端是照日期對齊，
     # 不是照索引。這裡只送合併口徑那一個數字，上市／上櫃分開的值留在
@@ -139,6 +167,8 @@ def build(quiet=False):
         "baselineDate": base_date,
         "baselines": baselines,
         "baselinePresets": cfg.get("baselinePresets", {}),
+        "fullScales": full_scales,
+        "fullScaleQuantile": q,
         "defaultWindow": cfg["defaultWindow"],
         "defaultLargeScope": cfg.get("defaultLargeScope", "all"),
         "defaultScoreMode": cfg.get("defaultScoreMode", "level"),
@@ -197,6 +227,9 @@ def build(quiet=False):
         print("  五票基準點（%s）：%s" % (
             base_date, "、".join("%s=%s" % (k, format(baselines[k], ","))
                                  for k in store.CHIP_COLS[1:])))
+        print("  滿分口數（|偏離| p%s）：%s" % (
+            q, "、".join("%s=%s" % (k, format(full_scales[k], ","))
+                         for k in store.CHIP_COLS[1:])))
         print("  結算日 %d 個：%s" % (len(site["settlements"]),
                                     ", ".join(site["settlements"])))
         print("  已寫出 data/site.json（%.0f KB）與 data/site.js"

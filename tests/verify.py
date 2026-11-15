@@ -67,6 +67,36 @@ def base_of(key, scope=None):
 
 BASE = {k: base_of(k) for k in
         ["foreign_fut", "top10_trader", "top10_specific", "foreign_opt", "dealer_opt"]}
+
+
+def full_of(key, scope=None):
+    scope = PAGE_SCOPE if scope is None else scope
+    if scope == "front" and key in ("top10_trader", "top10_specific"):
+        return prices["fullScales"][key + "_front"]
+    return prices["fullScales"][key]
+
+
+FULL = {k: full_of(k) for k in BASE}
+FULL_K = math.atanh(0.9)          # 讓「偏離 = 滿分口數」剛好得 0.90 分
+
+# build_site 的滿分口數要真的等於「全部歷史 |偏離基準| 的第 q 百分位」。
+# Python 這邊用另一種寫法（statistics.quantiles 不夠準，直接線性內插）再算一次。
+_Q = prices.get("fullScaleQuantile", 90)
+for _col in BASE_COLS:
+    _devs = sorted(abs(c[_col] - prices["baselines"][_col]) for c in RAW_CHIPS
+                   if c[_col] is not None)
+    _i = (len(_devs) - 1) * _Q / 100.0
+    _lo, _hi = int(_i), min(int(_i) + 1, len(_devs) - 1)
+    _want = int(round(_devs[_lo] + (_devs[_hi] - _devs[_lo]) * (_i - _lo)))
+    if prices["fullScales"][_col] != _want:
+        print("❌ fullScales[%s] = %s，但 |偏離| 的 p%s 是 %s"
+              % (_col, prices["fullScales"][_col], _Q, _want))
+        sys.exit(1)
+    if prices["fullScales"][_col] <= 0:
+        print("❌ fullScales[%s] 不是正數" % _col)
+        sys.exit(1)
+print("Python 端：滿分口數（|偏離| p%s）→ %s"
+      % (_Q, "、".join("%s=%s" % (k, format(v, ",")) for k, v in FULL.items())))
 print("Python 端：基準點取自 %s（口徑 %s）→ %s"
       % (BASE_DATE, PAGE_SCOPE,
          "、".join("%s=%s" % (k, format(v, ",")) for k, v in BASE.items())))
@@ -131,7 +161,7 @@ def _curve(u, name, k):
     return math.tanh(u / k) * 0.5
 
 
-def score_modes(series, mode, base, window, curve_name, curve_k):
+def score_modes(series, mode, base, window, curve_name, curve_k, full=None):
     """series 是 [{key: value}] 的全部歷史；回傳每天的 total（算不出來給 None）。"""
     out = []
     for i, row in enumerate(series):
@@ -144,6 +174,10 @@ def score_modes(series, mode, base, window, curve_name, curve_k):
             b = base[key]
             if mode == "level":
                 votes.append(1 if x > b else (-1 if x < b else 0))
+                continue
+            if mode == "levelc":
+                # 剩餘口數·類比：偏離 ÷ 滿分口數，tanh 校準到「滿分口數 = 0.90 分」
+                votes.append(math.tanh((x - b) / full[key] * FULL_K))
                 continue
             if i == 0:
                 ok = False
@@ -272,9 +306,12 @@ with sync_playwright() as pw:
         return pg.evaluate("""() => ({
             rows: [...document.querySelectorAll('#baseRows .base-row')].map(r => {
               const rng = r.querySelector('.base-range'), n = r.querySelector('.base-num');
+              const fn = r.querySelector('.base-fullnum');
               return { key: r.dataset.key,
                        label: r.querySelector('.base-label').textContent,
                        range: Number(rng.value), num: Number(n.value),
+                       full: Number(fn.value),
+                       fullShown: r.querySelector('.base-full').offsetParent !== null,
                        min: Number(rng.min), max: Number(rng.max),
                        presets: [...r.querySelectorAll('.base-preset')]
                                   .map(b => ({v: Number(b.dataset.v), on: b.classList.contains('on')})),
@@ -284,8 +321,26 @@ with sync_playwright() as pw:
             options: [...document.getElementById('baseDateSel').options]
                        .map(o => ({v: o.value, text: o.textContent, disabled: o.disabled})),
             note: document.getElementById('baseNote').textContent,
-            diffNote: document.getElementById('baseDiffNote').textContent
+            diffNote: document.getElementById('baseDiffNote').textContent,
+            blockLabel: document.getElementById('baseBlockLabel').textContent,
+            stats: [...document.querySelectorAll('.stat .k')].map(e => e.textContent)
           })""")
+
+    def set_mode(m):
+        pg.evaluate("""(k) => { const b = [...document.querySelectorAll('#modeSeg button')]
+                                .find(x => x.dataset.mode === k); if (b) b.click(); }""", m)
+        pg.wait_for_timeout(150)
+
+    def set_full(key, v):
+        pg.evaluate(
+            """([k, v]) => {
+                 const row = [...document.querySelectorAll('#baseRows .base-row')]
+                               .find(r => r.dataset.key === k);
+                 const n = row.querySelector('.base-fullnum');
+                 n.value = String(v);
+                 n.dispatchEvent(new Event('input', {bubbles: true}));
+               }""", [key, v])
+        pg.wait_for_timeout(150)
 
     # 主要比對要涵蓋全部歷史，所以先切到「全部」。
     # （預設視窗是 60 天，歷史比 60 天長的時候表格只會有 60 列。）
@@ -323,6 +378,23 @@ with sync_playwright() as pw:
     pg.eval_on_selector("#baseReset", "e => e.click()")
     pg.wait_for_timeout(150)
     base_ui_state["reset"] = base_ui()
+
+    # ---------- 剩餘口數·類比：滿分口數那一欄 ----------
+    set_mode("levelc")
+    base_ui_state["levelc"] = base_ui()
+    levelc_opt = pg.evaluate(
+        "JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+    # 把第 1 票的滿分口數砍半 → 同樣的偏離應該得到更高的分數
+    _half_full = max(1, FULL["foreign_fut"] // 2)
+    set_full("foreign_fut", _half_full)
+    base_ui_state["levelc_half"] = base_ui()
+    levelc_half_opt = pg.evaluate(
+        "JSON.parse(JSON.stringify(window.__OPTS__[window.__OPTS__.length-1]))")
+    # 重設之後要回到預設的滿分口數
+    pg.eval_on_selector("#baseReset", "e => e.click()")
+    pg.wait_for_timeout(150)
+    base_ui_state["levelc_reset"] = base_ui()
+    set_mode("level")
 
     # 表單元件在「深色系統主題」下的可讀性（白字白底 bug 的回歸測試）
     CONTRAST_JS = """
@@ -471,7 +543,7 @@ with sync_playwright() as pw:
                             .find(x => Number(x.dataset.win) === 0); if (b) b.click(); }""")
     set_base("foreign_fut", BASE["foreign_fut"])
     mode_series = {}
-    for _m in ("level", "flow", "blend"):
+    for _m in ("level", "levelc", "flow", "blend"):
         pg.evaluate("""(k) => { const b = [...document.querySelectorAll('#modeSeg button')]
                                 .find(x => x.dataset.mode === k); if (b) b.click(); }""", _m)
         pg.wait_for_timeout(150)
@@ -1030,6 +1102,10 @@ for idx, tip in zip([0, 5, 20], tips):
         fails.append("tooltip(%s) 總分跑到五票前面了" % d)
 print("tooltip：只剩籌碼——票數緊接在日期之後，個股行情與乖離率已移除，小計/總分在最後")
 
+_W0 = prices.get("scoreWindow", 20)
+_CV0 = prices.get("scoreCurve", "tanh")
+_CK0 = prices.get("scoreCurveK", 2.5)
+
 # ---------- 基準點的兩個設定介面 ----------
 # 這一節驗的是「兩個介面共用同一份基準、而且互相反映」。
 # 最容易出錯的是它們各自記一份：拉過滑桿之後選單還顯示某一天，
@@ -1149,6 +1225,86 @@ for _r in _rs["rows"]:
 print("基準點兩個介面：五票各自滑桿＋數字框（範圍包得住全部歷史）、"
       "日期選單一次換五票、兩者互相反映、重設回得去；"
       "基準日那天的總分必然是 0")
+
+# ---------- 滿分口數（剩餘口數·類比模式專屬的那一欄）----------
+# 重點有兩個：它只在類比模式出現（其他模式調了也沒反應，不該放在畫面上），
+# 以及調它要真的改變分數——第一版很容易寫成「存了但計分沒讀」，
+# 畫面上看起來有互動、分數卻一動也不動。
+_lv = base_ui_state["levelc"]
+_lvl = base_ui_state["default"]          # 剩餘口數模式
+if any(r["fullShown"] for r in _lvl["rows"]):
+    fails.append("剩餘口數模式不該顯示滿分口數那一欄（調了也沒反應）")
+if not all(r["fullShown"] for r in _lv["rows"]):
+    fails.append("類比模式應該五票都顯示滿分口數，實得 %s"
+                 % [(r["key"], r["fullShown"]) for r in _lv["rows"]])
+for _r in _lv["rows"]:
+    if _r["full"] != FULL[_r["key"]]:
+        fails.append("%s 的滿分口數是 %s，應該是 site.json 的 %s"
+                     % (_r["key"], _r["full"], FULL[_r["key"]]))
+    if "分" not in _r["now"]:
+        fails.append("類比模式下 %s 那一列應該顯示這天得幾分，實得 %r" % (_r["key"], _r["now"]))
+# 兩種模式的區塊標題要講清楚基準在這個模式裡扮演什麼
+if "+1" not in _lvl["blockLabel"]:
+    fails.append("剩餘口數模式的標題應該寫明是 ±1 的分界，實得 %r" % _lvl["blockLabel"])
+if "+1" in _lv["blockLabel"]:
+    fails.append("類比模式的標題不該還寫「投 +1 / −1 的分界」，實得 %r" % _lv["blockLabel"])
+
+# 畫面上算出來的分數 = Python 用同一組滿分口數重算
+_lv_tot = [s["data"] for s in levelc_opt["series"] if s.get("name") == "五票總分"][0]
+_want_lv = score_modes([{k: c[k] for k in KEYS} for c in chips],
+                       "levelc", BASE, _W0, _CV0, _CK0, full=FULL)
+def _same_series(a, b, tol=1e-9):
+    """浮點數列比對。tanh 的尾數在 JS 和 Python 之間差到 1e-16 是正常的，
+    拿 == 去比只會驗到兩邊的 libm 實作一不一樣。"""
+    if len(a) != len(b):
+        return [("len", len(a), len(b))]
+    return [(i, x, y) for i, (x, y) in enumerate(zip(a, b))
+            if (x is None) != (y is None) or (x is not None and abs(x - y) > tol)][:3]
+
+
+_bad = _same_series(_lv_tot, _want_lv)
+if _bad:
+    fails.append("類比模式的總分和 Python 重算不符，前幾個差異 %s" % _bad)
+# 基準日那天五票都是 0 → 總分 0（和剩餘口數模式同一條不變量）
+if abs(_lv_tot[_bi]) > 1e-12:
+    fails.append("類比模式下基準日 %s 的總分也應該是 0，實得 %s" % (BASE_DATE, _lv_tot[_bi]))
+
+# 砍半滿分口數：同樣的偏離要得到更高的分數（絕對值），而且是整串重算
+_half = base_ui_state["levelc_half"]
+_half_row = next(r for r in _half["rows"] if r["key"] == "foreign_fut")
+if _half_row["full"] != _half_full:
+    fails.append("改了滿分口數之後輸入框沒跟著：%s" % _half_row)
+_half_tot = [s["data"] for s in levelc_half_opt["series"] if s.get("name") == "五票總分"][0]
+_full_half = dict(FULL); _full_half["foreign_fut"] = _half_full
+_want_half = score_modes([{k: c[k] for k in KEYS} for c in chips],
+                         "levelc", BASE, _W0, _CV0, _CK0, full=_full_half)
+_bad = _same_series(_half_tot, _want_half)
+if _bad:
+    fails.append("滿分口數砍半之後的總分和 Python 重算不符：%s" % _bad)
+if not _same_series(_half_tot, _lv_tot):
+    fails.append("滿分口數砍半之後總分完全沒變——輸入框多半沒接到計分")
+# 每一票的第 1 票分數：砍半之後 |分數| 不可以變小
+_v1_before = [math.tanh((c["foreign_fut"] - BASE["foreign_fut"]) / FULL["foreign_fut"] * FULL_K)
+              for c in chips]
+_v1_after = [math.tanh((c["foreign_fut"] - BASE["foreign_fut"]) / _half_full * FULL_K)
+             for c in chips]
+if any(abs(b2) < abs(a) - 1e-12 for a, b2 in zip(_v1_before, _v1_after)):
+    fails.append("滿分口數變小，同樣的偏離卻得到更小的分數——方向反了")
+# 調過之後統計卡要出現「vs 預設設定」
+if not any("vs 預設" in k for k in _half["stats"]):
+    fails.append("調過滿分口數之後統計卡應該出現「vs 預設設定」，實得 %s" % _half["stats"])
+if any("vs 預設" in k for k in _lv["stats"]):
+    fails.append("還沒調任何東西時不該出現「vs 預設設定」，實得 %s" % _lv["stats"])
+# 重設要把滿分口數也拉回去（不是只拉基準）
+_rs2 = base_ui_state["levelc_reset"]
+for _r in _rs2["rows"]:
+    if _r["full"] != FULL[_r["key"]]:
+        fails.append("按了重設，%s 的滿分口數應該回到 %s，實得 %s"
+                     % (_r["key"], FULL[_r["key"]], _r["full"]))
+
+print("滿分口數：只在類比模式出現、預設等於 site.json、砍半會讓同樣的偏離得更高分、"
+      "重設拉得回來；基準日那天總分一樣是 0")
+
 
 # ---------- 大盤融資維持率 ----------
 # 這一條的重點是「它不是第六票」。最容易出錯的方向是讓它影響到總分，
@@ -1332,8 +1488,13 @@ _W = prices.get("scoreWindow", 20)
 _CV = prices.get("scoreCurve", "tanh")
 _CK = prices.get("scoreCurveK", 2.5)
 _series = [{k: c[k] for k in KEYS} for c in chips]      # 口徑 = 所有契約
-for _m, _label in (("level", "剩餘口數"), ("flow", "今日操作"), ("blend", "加權")):
-    want = score_modes(_series, _m, BASE, _W, _CV, _CK)
+# 口徑用 PAGE_SCOPE 那一組，和 BASE 一致。
+# 理由：_p2 的 chips.csv 是從「已經套用過口徑」的 chips 寫出去的，
+# 所以它的 top10_trader 欄裝的就是 PAGE_SCOPE 那一種口徑的數字；
+# 畫面上雖然切在「所有契約」，讀到的其實是同一串值。
+for _m, _label in (("level", "剩餘口數"), ("levelc", "剩餘口數·類比"),
+                   ("flow", "今日操作"), ("blend", "加權")):
+    want = score_modes(_series, _m, BASE, _W, _CV, _CK, full=FULL)
     got = mode_series.get(_m)
     if got is None:
         fails.append("%s 模式找不到五票總分序列" % _label)
@@ -1356,11 +1517,32 @@ _n = len(chips)
 _have = {m: sum(1 for v in (mode_series[m] or []) if v is not None) for m in mode_series}
 if _have.get("level") != _n:
     fails.append("剩餘口數模式應該每天都算得出來（%d 天），實得 %s" % (_n, _have.get("level")))
+# 類比模式也沒有暖身期——這是它和加權模式最重要的差別之一
+if _have.get("levelc") != _n:
+    fails.append("剩餘口數·類比模式應該每天都算得出來（%d 天，沒有暖身期），實得 %s"
+                 % (_n, _have.get("levelc")))
 if _have.get("flow") != _n - 1:
     fails.append("今日操作模式應該少第一天（%d 天），實得 %s" % (_n - 1, _have.get("flow")))
 if _have.get("blend") != _n - _W - 1:
     fails.append("加權模式暖身 %d 天，應該剩 %d 天，實得 %s"
                  % (_W + 1, _n - _W - 1, _have.get("blend")))
+
+# 類比模式的校準：偏離剛好等於滿分口數時，那一票必須是 0.90 分。
+# 這是「滿分口數」這個名字唯一的意義，算錯的話名字就是騙人的。
+_cal = math.tanh(1.0 * FULL_K)
+if abs(_cal - 0.9) > 1e-12:
+    fails.append("校準係數不對：偏離 = 滿分口數時應該得 0.90 分，實得 %.6f" % _cal)
+# 而且不封頂——1.5 倍和 2.0 倍要分得出來
+if not (math.tanh(1.5 * FULL_K) < math.tanh(2.0 * FULL_K) < 1.0):
+    fails.append("類比模式不該封頂：1.5 倍與 2.0 倍滿分口數必須分得出大小")
+# 類比和加權不可以算出同一串——它們的分母不同（固定口數 vs 窗內波動）
+_lc = [v for v in (mode_series.get("levelc") or []) if v is not None]
+_bl = [v for v in (mode_series.get("blend") or []) if v is not None]
+if _lc and _bl and _lc[-len(_bl):] == _bl:
+    fails.append("類比模式和加權模式算出完全一樣的分數——分母多半接錯了")
+if _lc:
+    print("  類比模式：%d 天有分數（沒有暖身期），範圍 %+.2f ~ %+.2f"
+          % (len(_lc), min(_lc), max(_lc)))
 
 # 加權模式的重點：曲線設定要真的生效。把同一份資料用 clamp2 再算一次，
 # 兩者必須不同——如果一樣，代表 config 的 scoreCurve 沒被讀到，或被寫死成 clamp。
@@ -1369,7 +1551,8 @@ if not _blend:
     print("  [略過] 這份歷史只有 %d 天，暖身 %d 天之後沒有可比的加權分數；"
           "曲線相關的斷言在天數足夠的 repo 上才會執行" % (_n, _W + 1))
 else:
-    _alt = [v for v in score_modes(_series, "blend", BASE, _W, "clamp2", _CK) if v is not None]
+    _alt = [v for v in score_modes(_series, "blend", BASE, _W, "clamp2", _CK,
+                                   full=FULL) if v is not None]
     if _alt == _blend:
         fails.append("加權模式用 clamp2 重算得到完全一樣的結果——scoreCurve 設定多半沒生效")
     # tanh 不封頂：任何一天的單欄分數都不該正好是 ±0.5（那是 clamp 的特徵）
@@ -1385,8 +1568,9 @@ else:
         fails.append("加權模式的表格應該有暖身不足的 — 列")
 if "tanh" not in mode_note_blend and "封頂" not in mode_note_blend:
     fails.append("加權模式的說明應該講清楚用的是哪條曲線，實得：%r" % mode_note_blend[:80])
-print("三種計分模式：%d 天逐日與 Python 獨立重算一致（剩餘口數 %d／今日操作 %d／加權 %d 天有分數）"
-      % (_n, _have.get("level", 0), _have.get("flow", 0), _have.get("blend", 0)))
+print("四種計分模式：%d 天逐日與 Python 獨立重算一致（剩餘口數 %d／類比 %d／今日操作 %d／加權 %d 天有分數）"
+      % (_n, _have.get("level", 0), _have.get("levelc", 0),
+         _have.get("flow", 0), _have.get("blend", 0)))
 if _blend:
     print("  加權模式：%d 天有分數，範圍 %+.2f ~ %+.2f，且與 clamp2 重算的結果不同"
           % (len(_blend), min(_blend), max(_blend)))
@@ -1496,6 +1680,6 @@ if fails:
     for f in fails[:40]:
         print("   -", f)
     sys.exit(1)
-print("✅ 全部通過：%d 天 × 2 組基準 × 3 種計分模式（口徑 %s），表格 / tooltip / 圖表序列 / 背景色塊 / "
+print("✅ 全部通過：%d 天 × 2 組基準 × 4 種計分模式（口徑 %s），表格 / tooltip / 圖表序列 / 背景色塊 / "
       "markLine / 副圖單軸（偏離基準） / 顏色與對比 / 偏好記憶 皆與 Python 獨立計算一致"
       % (len(chips), "近月" if PAGE_SCOPE == "front" else "所有契約"))

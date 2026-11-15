@@ -607,6 +607,16 @@ check(set(_bl) == set(store.CHIP_COLS[1:]),
 _brow = next(r for r in store.read_chips() if r["date"] == _m_date)
 check(all(_bl.get(k) == _brow[k] for k in store.CHIP_COLS[1:]),
       "baselines 的值要等於 chips.csv 裡 %s 那一列，實得 %s" % (_m_date, _bl))
+
+# 滿分口數（剩餘口數·類比模式用的尺度）也要送出去，而且一定是正數——
+# 0 會讓那一票的分母是 0，整票靜悄悄地廢掉
+_fs = _site.get("fullScales") or {}
+check(set(_fs) == set(store.CHIP_COLS[1:]),
+      "fullScales 要有全部七個欄位，實得 %s" % sorted(_fs))
+check(all(isinstance(v, int) and v > 0 for v in _fs.values()),
+      "fullScales 每一個都要是正整數，實得 %s" % _fs)
+_q = _site.get("fullScaleQuantile")
+check(_q == 90, "fullScaleQuantile 應該是 config 的 90，實得 %r" % _q)
 print("  site.json：維持率是 {date, ratio} 陣列（天數可以和籌碼不同，前端照日期對齊）；"
       "五票基準點是 baselineDate 那一列的七個欄位")
 
@@ -637,6 +647,31 @@ _raw14["baselineDate"] = _m_date
 with open(cfg_path, "w", encoding="utf-8") as _f:
     json.dump(_raw14, _f, ensure_ascii=False)
 print("  基準點：baselineDate 指向不存在的日期時 build_site 直接失敗（不退回其他日期）")
+
+# 15) fullScaleQuantile 超出範圍也要直接失敗。0 或 100 以外的值算出來的
+#     滿分口數不是沒有意義就是會變成 0，而分母 0 會讓整票靜悄悄地廢掉。
+for _bad in (0, 100, -5, 150):
+    with open(cfg_path, encoding="utf-8") as _f:
+        _raw15 = json.load(_f)
+    _raw15["fullScaleQuantile"] = _bad
+    with open(cfg_path, "w", encoding="utf-8") as _f:
+        json.dump(_raw15, _f, ensure_ascii=False)
+    try:
+        with _ctx.redirect_stdout(_io2.StringIO()), _ctx.redirect_stderr(_io2.StringIO()):
+            build_site.build(quiet=True)
+        check(False, "fullScaleQuantile=%r 時 build_site 應該失敗，卻正常跑完" % _bad)
+    except SystemExit as e:
+        check("fullScaleQuantile" in str(e),
+              "fullScaleQuantile=%r 的錯誤訊息應該指名是這個設定，實得 %r" % (_bad, str(e)))
+    except Exception as e:                                        # noqa: BLE001
+        check(False, "fullScaleQuantile=%r 應該是 SystemExit，實得 %s：%s"
+                     % (_bad, type(e).__name__, e))
+with open(cfg_path, encoding="utf-8") as _f:
+    _raw15 = json.load(_f)
+_raw15["fullScaleQuantile"] = 90
+with open(cfg_path, "w", encoding="utf-8") as _f:
+    json.dump(_raw15, _f, ensure_ascii=False)
+print("  滿分口數：fullScaleQuantile 超出 0~100 時 build_site 直接失敗")
 
 shutil.rmtree(work, ignore_errors=True)
 

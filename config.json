@@ -35,6 +35,7 @@
       -80000
     ]
   },
+  "fullScaleQuantile": 90,
   "defaultWindow": 60,
   "windowOptions": [
     20,

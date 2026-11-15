@@ -11,6 +11,8 @@
   var BASE_DATE = null;    // 預設基準點取自哪一天（config.json 的 baselineDate）
   var BASE_DEFAULT = {};   // 那一天的七個欄位值（含兩種十大口徑）
   var BASE_PRESETS = {};   // 某幾票的快捷按鈕，例如 {foreign_fut: [-83000, -80000]}
+  var FULL_DEFAULT = {};   // 每票的「滿分口數」預設值（build_site 從歷史推的）
+  var FULL_QUANTILE = 90;  // 那個預設值取的是 |偏離| 的第幾百分位（只拿來寫說明）
   var MA_PERIOD = 20;      // 乖離率的均線天數（月線）
   var BIAS_ALERT = 15;     // 正乖離超過這個百分比就標紅
   var WINDOW_OPTIONS = [20, 60, 120, 0];   // 0 = 全部
@@ -53,6 +55,7 @@
     compare: false,
     base: {},              // 五票各自的基準點。鍵是 chips.csv 的欄位名（七個，
                            // 十大兩種口徑各存一份），取值一律走 baseOf()
+    full: {},              // 每票的「滿分口數」，鍵同上，取值走 fullOf()
     baseFrom: null,        // 目前這組基準來自哪一天；手動調過就變 null（＝自訂）
     scope: 'all',          // 十大交易人口徑：'all' 所有契約 / 'front' 近月
     mode: 'level',         // 計分模式：'level' 剩餘口數 / 'flow' 今日操作 / 'blend' 加權
@@ -76,13 +79,15 @@
     });
   }
   function sign(n) { return (n > 0 ? '+' : '') + n; }
-  // 模式 1、2 的票是整數（+1 / -1），模式 3 是連續值（+0.43）。
+  // 剩餘口數 / 今日操作的票是整數（+1 / -1），類比 / 加權是連續值（+0.43）。
   // 統一從這裡出去，免得有的地方顯示 0.4299999999999999。
   function fmtScore(v) {
     if (v === null || v === undefined || isNaN(v)) return '—';
     var r = Math.round(v * 100) / 100;
     return (r > 0 ? '+' : (r === 0 ? '' : '')) + (Number.isInteger(r) ? r : r.toFixed(2));
   }
+  // 分數是連續值的模式（圖上不畫階梯線、點畫小一點、數字要帶小數）
+  function isAnalog() { return S.mode === 'levelc' || S.mode === 'blend'; }
   function modeLabel() {
     for (var i = 0; i < MODES.length; i++) if (MODES[i].key === S.mode) return MODES[i].label;
     return S.mode;
@@ -296,6 +301,26 @@
     var v = S.base[baseKey(key)];
     return (v === undefined || v === null) ? 0 : v;
   }
+  /* 「滿分口數」：剩餘口數·類比模式用的尺度。偏離到這個量 = 0.90 分。
+   * 和基準一樣，十大那兩票兩種口徑各記一份（近月和所有契約的波動幅度不一樣）。
+   */
+  function fullOf(key) {
+    var v = S.full[baseKey(key)];
+    return (v > 0) ? v : 0;          // 0 代表算不出來，計分時那天直接作廢
+  }
+  function setFull(key, v) {
+    var n = Math.round(Number(v));
+    if (!(n > 0)) return false;      // 0 或負數會讓整票失效，直接拒絕
+    S.full[baseKey(key)] = n;
+    return true;
+  }
+  function sameFull() {
+    for (var i = 0; i < CHIP_COLS.length; i++) {
+      if (S.full[CHIP_COLS[i]] !== FULL_DEFAULT[CHIP_COLS[i]]) return false;
+    }
+    return true;
+  }
+
   function setBase(key, v) {
     S.base[baseKey(key)] = Math.round(Number(v));
     // 調完之後重新問一次「這組基準對應到哪一天」，而不是直接標成自訂。
@@ -370,7 +395,9 @@
    *   blend  權重：每欄拆成水位 0.5 + 操作 0.5
    */
   var MODES = [
-    { key: 'level', label: '剩餘口數', note: '五張票各看剩餘口數離自己基準點的正負，±1（剛好等於基準是 0）。' },
+    { key: 'level',  label: '剩餘口數', note: '五張票各看剩餘口數離自己基準點的正負，±1（剛好等於基準是 0）。' },
+    { key: 'levelc', label: '剩餘口數·類比',
+      note: '同樣看離基準多遠，但分數連續：偏離到「滿分口數」得 0.90 分，再遠繼續逼近 1 但不封頂。' },
     { key: 'flow',  label: '今日操作', note: '五張票各看今日操作（今日 − 昨日）的正負，±1。' },
     { key: 'blend', label: '加權',     note: '每欄拆成水位 0.5 ＋ 操作 0.5，分數連續。' }
   ];
@@ -399,6 +426,24 @@
   var SCORE_WINDOW = 20;
   var SCORE_CURVE = 'tanh';    // 'tanh' | 'clamp2' | 'clamp3'
   var CURVE_K = 2.5;           // tanh 的緩和係數
+
+  /* 剩餘口數·類比（levelc）的算法：
+   *
+   *   分數 = tanh( 偏離基準 ÷ 滿分口數 × atanh(0.9) )      ∈ (-1, +1)
+   *
+   * atanh(0.9) = 1.4722… 這個係數只是在「校準」：它讓「偏離剛好等於滿分口數」
+   * 時分數剛好是 0.90。沒有它的話 tanh(1) = 0.76，滿分口數這個名字就名不副實。
+   * 不封頂是刻意的——偏離 1.5 倍（0.986）和 2.0 倍（0.998）仍然分得出大小，
+   * 換成線性封頂的話現有資料裡約 10% 的天數會擠在同一個分數上。
+   *
+   * 和加權模式的水位分差在分母：這裡是「你設定的固定口數」，
+   * 加權是「最近 20 日的穩健標準差」。兩個回答的是不同問題——
+   *   類比：離基準幾口（絕對）
+   *   加權：離基準幾倍平常波動（相對）
+   * 所以兩種並存，不是誰取代誰。實測差距可以很大：2026/09/16 偏離只有 4,715 口，
+   * 但前 20 天非常安靜（σ=1,541），加權的水位分給 +0.84，類比只給 +0.30。
+   */
+  var FULL_K = 1.4722194895832204;     // = atanh(0.9)
 
   function curve(u) {
     if (!isFinite(u)) return 0;
@@ -440,6 +485,12 @@
           v.push(x > b ? 1 : (x < b ? -1 : 0));
           continue;
         }
+        if (S.mode === 'levelc') {
+          var fs = fullOf(f.key);
+          if (!(fs > 0)) { ok = false; break; }   // 滿分口數壞掉時整天作廢，不給 0
+          v.push(Math.tanh((x - b) / fs * FULL_K));
+          continue;
+        }
         if (i === 0) { ok = false; break; }          // 沒有前一日就沒有「今日操作」
         var d = x - S.allChips[i - 1][f.key];
 
@@ -470,11 +521,12 @@
   function scoreAll() {
     return scoreHistory().slice(S.startIdx);
   }
-  // 用另一組基準算一遍（統計卡要比「你調過的基準」和「預設基準」差幾天）
-  function scoreWithBase(base) {
-    var keep = S.base, keepFrom = S.baseFrom;
-    S.base = base;
-    try { return scoreAll(); } finally { S.base = keep; S.baseFrom = keepFrom; }
+  // 用另一組設定算一遍（統計卡要比「你調過的」和「預設」差幾天）
+  function scoreWithSettings(base, full) {
+    var kb = S.base, kf = S.full, kFrom = S.baseFrom;
+    S.base = base; S.full = full;
+    try { return scoreAll(); }
+    finally { S.base = kb; S.full = kf; S.baseFrom = kFrom; }
   }
 
   // 取一個「好看的」刻度間距：1/1.5/2/2.5/3/4/5/6/8 ×10^k 之中，>= x 的最小值
@@ -708,7 +760,7 @@
                ' 換成分數。外資期貨與選擇權外資幾乎不會由負翻正，中性點改用窗內中位數；' +
                '其餘三欄用 0。前 ' + (SCORE_WINDOW + 1) + ' 天暖身不足，顯示 —。';
       }
-      // 門檻只有模式 1 會用到，其他模式直接把整塊停用，免得以為調了有效
+      // 這一塊只有需要水位的模式用得到，其他模式直接停用，免得以為調了有效
       var off = (S.mode !== 'level');
       var blk = el('thrBlock');
       if (blk) {
@@ -886,6 +938,23 @@
       });
       row.appendChild(pbox);
 
+      // 滿分口數。只有「剩餘口數·類比」模式用得到，所以其他模式整欄收起來
+      // （留在 DOM 裡但不顯示），免得控制列上有一堆調了沒反應的東西。
+      var fbox = document.createElement('span');
+      fbox.className = 'base-full';
+      var flab = document.createElement('span');
+      flab.className = 'base-full-label'; flab.textContent = '滿分';
+      var fnum = document.createElement('input');
+      fnum.type = 'number'; fnum.className = 'base-fullnum';
+      fnum.min = 1; fnum.step = Math.max(1, r.step);
+      fnum.setAttribute('aria-label', f.label + ' 的滿分口數');
+      fnum.oninput = function () {
+        if (fnum.value === '' || !setFull(f.key, fnum.value)) return;
+        syncBaseControls(); render();
+      };
+      fbox.appendChild(flab); fbox.appendChild(fnum);
+      row.appendChild(fbox);
+
       var now = document.createElement('span');
       now.className = 'base-now';
       row.appendChild(now);
@@ -920,8 +989,11 @@
     };
 
     el('baseReset').onclick = function () {
-      S.base = {};
-      CHIP_COLS.forEach(function (k) { S.base[k] = BASE_DEFAULT[k]; });
+      S.base = {}; S.full = {};
+      CHIP_COLS.forEach(function (k) {
+        S.base[k] = BASE_DEFAULT[k];
+        S.full[k] = FULL_DEFAULT[k];
+      });
       S.baseFrom = BASE_DATE;
       syncBaseControls(); render();
     };
@@ -946,22 +1018,45 @@
       Array.prototype.forEach.call(row.querySelectorAll('.base-preset'), function (b) {
         b.classList.toggle('on', Number(b.dataset.v) === v);
       });
+      var fnum = row.querySelector('.base-fullnum');
+      var fv = fullOf(key);
+      fnum.step = Math.max(1, r.step);
+      if (Number(fnum.value) !== fv) fnum.value = fv;
+
       var now = row.querySelector('.base-now');
       if (!last) { now.textContent = ''; return; }
       var d = devOf(last, key);
       now.innerHTML = '最新 ' + fmt(last[key]) + '　偏離 <b class="' +
-        (d === null ? '' : cls(d)) + '">' + fmtDelta(d) + '</b>';
+        (d === null ? '' : cls(d)) + '">' + fmtDelta(d) + '</b>' +
+        // 類比模式才顯示這天實際得幾分——調滿分口數時馬上看得到效果
+        (S.mode === 'levelc' && fv > 0 && d !== null
+          ? '　→ <b class="' + cls(d) + '">' +
+            fmtScore(Math.tanh(d / fv * FULL_K)) + ' 分</b>'
+          : '');
     });
+    el('baseRows').classList.toggle('show-full', S.mode === 'levelc');
+
+    // 標題要跟著模式走：類比模式下「投 +1 / −1 的分界」是錯的說法
+    // 標題要跟著模式走：類比模式下「投 +1 / −1 的分界」是錯的說法，
+    // 今日操作模式根本不看水位（基準只剩下決定副圖畫在哪裡）
+    var BASE_ROLE = { level: '（投 +1 / −1 的分界）', levelc: '（分數的零點）',
+                      blend: '（水位分的中性點）',
+                      flow: '（今日操作模式不看水位，基準只影響副圖）' };
+    el('baseBlockLabel').textContent = '五票的基準點' + (BASE_ROLE[S.mode] || '');
 
     var sel = el('baseDateSel');
     sel.value = S.baseFrom || '';
-    var same = sameBase(S.base, BASE_DEFAULT);
-    el('baseNote').innerHTML = S.baseFrom
+    var same = sameBase(S.base, BASE_DEFAULT) && sameFull();
+    el('baseNote').innerHTML = (S.baseFrom
       ? '基準＝<b>' + S.baseFrom + '</b> 那天的剩餘口數' +
         (same ? '（就是預設值）' : '') + '。副圖畫的是每天離這組基準多少口，' +
         '<b>0 線以上投 +1</b>。'
       : '基準是<b>手動調過的</b>，不對應任何一天。要回到 ' + BASE_DATE +
-        ' 按「重設為預設」，或直接從選單挑一天。';
+        ' 按「重設為預設」，或直接從選單挑一天。') +
+      (S.mode === 'levelc'
+        ? '　<b>滿分口數</b>＝偏離多少口算 0.90 分（預設是全部歷史 |偏離| 的第 ' +
+          FULL_QUANTILE + ' 百分位），再遠會繼續逼近 1 但不封頂。'
+        : '');
   }
   function sameBase(a, b) {
     for (var i = 0; i < CHIP_COLS.length; i++) {
@@ -972,7 +1067,7 @@
 
   // ---------------------------------------------------------------- 統計條 / 基準點比較
   function renderStats(sc) {
-    // 算不出來的日子（模式 2 的第一天、模式 3 暖身不足）一律不計入統計，
+    // 算不出來的日子（今日操作的第一天、加權暖身不足）一律不計入統計，
     // 不能當成 0——0 是「多空剛好抵銷」，和「算不出來」是兩件事。
     var have = sc.filter(function (s) { return s; });
     var pos = 0, neg = 0, zero = 0;
@@ -987,10 +1082,10 @@
      *
      * 三種模式都適用：基準點現在同時是剩餘口數模式的分界和加權模式的中性點。
      */
-    var atDefault = sameBase(S.base, BASE_DEFAULT);
+    var atDefault = sameBase(S.base, BASE_DEFAULT) && sameFull();
     var diff = [];
     if (!atDefault) {
-      var a = sc, b = scoreWithBase(BASE_DEFAULT);
+      var a = sc, b = scoreWithSettings(BASE_DEFAULT, FULL_DEFAULT);
       for (var i = 0; i < a.length; i++) {
         if (a[i] && b[i] && a[i].total !== b[i].total) diff.push(S.dates[i]);
       }
@@ -1015,7 +1110,7 @@
       (atDefault
         ? card('可計分天數', have.length + '<small>/ ' + sc.length + '</small>',
                have.length === sc.length ? '' : 'pending')
-        : card('vs 預設基準', diff.length + '<small> 天不同</small>',
+        : card('vs 預設設定', diff.length + '<small> 天不同</small>',
                diff.length ? 'pending' : ''))
     ].join('');
 
@@ -1024,17 +1119,19 @@
       : '';
     if (atDefault) {
       el('baseDiffNote').innerHTML =
-        '基準是預設的那一組（' + BASE_DATE + '），所以沒有對照可比。' +
+        '基準' + (S.mode === 'levelc' ? '與滿分口數' : '') +
+        '都是預設的那一組（' + BASE_DATE + '），所以沒有對照可比。' +
         '調過之後這裡會告訴你和預設差幾天。' + warm;
       return;
     }
     var few = diff.length <= 12;
     el('baseDiffNote').innerHTML = (diff.length
-      ? '和預設基準（<b>' + BASE_DATE + '</b>）相比，「' + modeLabel() +
+      ? '和預設設定（基準 <b>' + BASE_DATE + '</b>' +
+        (sameFull() ? '' : '＋你改過的滿分口數') + '）相比，「' + modeLabel() +
         '」模式的總分不同的有 <b>' + diff.length + '</b> 天' +
         (few ? '：' + diff.join('、') : '（區間較長，日期請看下方表格）') + '。'
-      : '雖然基準調過了，但在本區間內「' + modeLabel() +
-        '」模式的總分和預設基準完全相同。') + warm;
+      : '雖然設定調過了，但在本區間內「' + modeLabel() +
+        '」模式的總分和預設完全相同。') + warm;
   }
   function card(k, v, c) {
     return '<div class="stat"><div class="k">' + k + '</div><div class="v ' + (c || '') + '">' + v + '</div></div>';
@@ -1114,11 +1211,11 @@
 
     var scoreSeries = {
       name: '五票總分',
-      // 模式 1、2 的總分是整數、階梯線才對；模式 3 是連續值，階梯會看起來很怪
-      type: 'line', step: (S.mode === 'blend' ? false : 'middle'),
+      // 剩餘口數 / 今日操作的總分是整數、階梯線才對；類比 / 加權是連續值，階梯會很怪
+      type: 'line', step: (isAnalog() ? false : 'middle'),
       xAxisIndex: 0, yAxisIndex: 1,
       data: sc.map(function (s) { return s ? s.total : null; }),
-      symbol: 'circle', symbolSize: S.mode === 'blend' ? 5 : 8, showSymbol: true,
+      symbol: 'circle', symbolSize: isAnalog() ? 5 : 8, showSymbol: true,
       lineStyle: { width: 2, color: SCORE_COLOR },
       itemStyle: { color: SCORE_COLOR, borderColor: '#fcfcfb', borderWidth: 2 },
       connectNulls: false,          // 暖身不足的那段要斷開，不要連成一條假線
@@ -1342,6 +1439,7 @@
 
     h += '<div style="padding:0 11px 8px;font-size:10.5px;color:#a09e97">計分模式：' + modeLabel() +
          '　基準：' + (S.baseFrom ? S.baseFrom : '自訂') +
+         (S.mode === 'levelc' ? '（偏離到滿分口數 ＝ 0.90 分）' : '') +
          (s ? '' : '（暖身不足，這天算不出分數）') + '</div>';
     return h;
   }
@@ -1493,9 +1591,17 @@
       throw new Error('site.json 少了 baselines / baselineDate：'
                       + '跑一次 python3 build_site.py');
     }
+    if (!site.fullScales) {
+      throw new Error('site.json 少了 fullScales：跑一次 python3 build_site.py');
+    }
     BASE_DATE = site.baselineDate;
     BASE_DEFAULT = site.baselines;
-    CHIP_COLS.forEach(function (k) { S.base[k] = BASE_DEFAULT[k]; });
+    FULL_DEFAULT = site.fullScales;
+    if (site.fullScaleQuantile) FULL_QUANTILE = site.fullScaleQuantile;
+    CHIP_COLS.forEach(function (k) {
+      S.base[k] = BASE_DEFAULT[k];
+      S.full[k] = FULL_DEFAULT[k];
+    });
     S.baseFrom = BASE_DATE;
     if (site.scoreWindow) SCORE_WINDOW = site.scoreWindow;
     if (site.scoreCurve) SCORE_CURVE = site.scoreCurve;
